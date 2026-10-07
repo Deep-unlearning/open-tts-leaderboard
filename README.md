@@ -18,6 +18,15 @@ By relying on objective metrics **evaluating a model drops from a couple weeks (
 
 Our intention with this leaderboard is for it to be **shaped by the community**; we want to hear your feedback so the evaluations stay relevant and insightful.
 
+## Table of contents
+
+- [Setup for running evaluations](#setup-for-running-evaluations)
+- [Batch evaluation (main tab)](#batch-evaluation-main-tab)
+  - [Publishing results](#publishing-results)
+- [Adding a new model](#adding-a-new-model)
+- [Time-to-first audio (streaming) evaluation](#time-to-first-audio-streaming-evaluation)
+- [Citation](#citation)
+
 ## Setup for running evaluations
 
 #### 1. Hugging Face account:
@@ -176,10 +185,17 @@ python scripts/open_results_pr.py --model_id openbmb/VoxCPM2 \
     --num_languages 9 --model_size_b 0.5 --transformers no --open_pr
 ```
 
+A new versions entry should be set in the HF space code [here](https://huggingface.co/spaces/hf-audio/open_tts_leaderboard/blob/main/leaderboard_data.py#L50).
+
 
 ## Adding a new model
 
-**PROTIP**: Ask your agent to make a new folder to evaluate the new model, and link a documentation page with usage. Ask it to use batch inference if possible and to implement the TTFA probe if the model supports streaming. If you give it permission to your HF account, ask it to make an HF space to run the model via HF jobs, taking inspiration from one of the existing configuration [here](https://huggingface.co/collections/bezzam/tts-eval).
+> [!TIP]
+> **Let your coding agent do the heavy lifting!** Ask it to:
+> - make a new folder to evaluate the new model, linking it to a documentation page with usage
+> - use batch inference if possible
+> - implement the TTFA probe if the model supports streaming
+> - (if you give it permission to your HF account) make a Docker Space to run the model via HF Jobs, taking inspiration from one of the existing configurations [here](https://huggingface.co/collections/bezzam/tts-eval)
 
 1. **Create the environment image.** Create a **public** [Docker Space](https://huggingface.co/new-space?sdk=docker) (HF Jobs can't pull private ones), e.g. `YOUR_USERNAME/evals-<backend>`, whose `Dockerfile` installs the model's dependencies. It only needs the Dockerfile; the eval scripts are injected at runtime. See the existing Spaces [here](https://huggingface.co/collections/bezzam/tts-eval). Models that run with `transformers` can instead be added to the [transformers/](transformers/) backend.
 2. **Write `<backend>/run_eval.py`**, which evaluates one dataset split. The shared helpers in [scripts/run_eval_utils.py](scripts/run_eval_utils.py) handle the parts common to every backend, so the script mostly contains the model-specific code. It should:
