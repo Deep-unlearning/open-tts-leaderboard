@@ -1,3 +1,6 @@
+*.jsonl
+*.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -216,3 +219,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Backend Dockerfiles live in their HF Docker Spaces (bezzam/evals-*), not in this repo
+Dockerfile
+Dockerfile.*
+
+# Backend Dockerfiles live in their HF Spaces, not in this repo.
+Dockerfile
