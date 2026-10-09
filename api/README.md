@@ -91,7 +91,7 @@ MODEL=fish/s2.1-pro VOICE_CLONE=true STAGES="transcribe sim score" \
   bash api/submit_jobs.sh --only_langs en
 ```
 
-Scorer Jobs use the shared public `bezzam/evals` image, inject this checkout's scorer scripts and default to `l4x1`. `SPACE`, `ASR_FLAVOR`, `SIM_FLAVOR`, `ASR_BATCH_SIZE`, `SIM_BATCH_SIZE`, `MAX_AUDIO_SECONDS` and `SIM_BACKEND` have the same meanings as in the existing backend pipelines. The default SIM backend is `wavlm_seed_tts`; its scores are separate from `xvector` scores. Regeneration forces ASR/SIM recomputation, and result export rejects stale SIM forks.
+Scorer Jobs use the shared public `bezzam/evals` image, inject this checkout's scorer scripts and default to `l4x1`. `SPACE`, `ASR_FLAVOR`, `SIM_FLAVOR`, `ASR_BATCH_SIZE`, `SIM_BATCH_SIZE`, `MAX_AUDIO_SECONDS` and `SIM_BACKEND` have the same meanings as in the existing backend pipelines. The default SIM backend is `wavlm_seed_tts`; its scores are separate from `xvector` scores. API manifests record SHA-256 hashes of the generated and reference WAVs. SIM resumes reuse a prior score only when both hashes match, including forks retained in the bucket after a generation-only overwrite. Older API rows without these hashes are recomputed. Result export rejects stale SIM forks.
 
 Inspect the planned commands without API calls, uploads or Jobs:
 

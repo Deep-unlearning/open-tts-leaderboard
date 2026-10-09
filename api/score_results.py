@@ -82,7 +82,8 @@ def checked_similarity(rows: list[dict], sim_backend: str, path: Path):
 
 
 def assert_current_sim(canonical_rows: list[dict], scored_rows: list[dict], path: Path):
-    fields = ("audio_filepath", "text", "pred_text", "prompt_audio_filepath", "api_latency_s", "api_attempts", "api_ttfa_ms")
+    fields = ("audio_filepath", "text", "pred_text", "prompt_audio_filepath", "audio_sha256",
+              "prompt_audio_sha256", "api_latency_s", "api_attempts", "api_ttfa_ms")
     def identities(rows):
         return {row["audio_filepath"]: tuple(row.get(field) for field in fields) for row in rows}
     if identities(canonical_rows) != identities(scored_rows):

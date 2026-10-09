@@ -283,6 +283,8 @@ def run(args, provider=None, samples=None):
         entry.pop("pred_text")
         entry.update({
             "model_id": args.model_id, "language": args.language, "timing_backend": "api",
+            "audio_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+            "prompt_audio_sha256": hashlib.sha256(request.reference_audio).hexdigest() if args.voice_clone else None,
             "api_latency_s": latency, "api_attempts": attempts,
             "api_ttfa_ms": (result.first_audio_at - call_start) * 1000 if result.first_audio_at else None,
             "api_request_id": result.request_id,

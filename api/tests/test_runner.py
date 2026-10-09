@@ -1,5 +1,6 @@
 """Exercise real WAV/manifest generation with an offline synthesis provider."""
 
+import hashlib
 import io
 import json
 import time
@@ -64,6 +65,7 @@ def test_generation_writes_portable_wavs_and_separate_timings(tmp_path, monkeypa
         assert "pred_text" not in row
         assert row["api_attempts"] == 1 and row["api_ttfa_ms"] >= 0
         audio, rate = sf.read(manifest().parent / row["audio_filepath"])
+        assert row["audio_sha256"] == hashlib.sha256((manifest().parent / row["audio_filepath"]).read_bytes()).hexdigest()
         assert len(audio) == 240 and rate == 24000
         assert not Path(row["audio_filepath"]).is_absolute()
 
@@ -131,6 +133,7 @@ def test_clone_uses_each_reference_and_non_clone_uses_one_fixed_reference(tmp_pa
     assert provider.requests[0].reference_audio != provider.requests[1].reference_audio
     for row in rows():
         assert (manifest().parent / row["prompt_audio_filepath"]).is_file()
+        assert row["prompt_audio_sha256"] == hashlib.sha256((manifest().parent / row["prompt_audio_filepath"]).read_bytes()).hexdigest()
         assert "sim" in row
     provider = OfflineProvider()
     run_eval.run(arguments("--model_id", "fish/s2.1-pro"), provider, data)
