@@ -128,6 +128,8 @@ TTFA_TARGETS=(
     # is whole-utterance and is what the leaderboard's WER/RTFx are measured on.
     "neutts-nano-gguf|neutts-nano|bezzam/evals-neutts|neuphonic/neutts-nano-q8-gguf|"
     "omnivoice|omnivoice|bezzam/evals-omnivoice|k2-fsa/OmniVoice|--language=${TTFA_LANG}"
+    # ONNX Runtime: the CUDA EP on the GPU flavor; TTFA_DEVICE=cpu runs the package's own 1-thread CPU session.
+    "paradee|paradee|bezzam/evals-paradee|sahilmahendrakar/Paradee-8M-v1.0|"
     "pocket-tts|pocket-tts|bezzam/evals-pocket|kyutai/pocket-tts|--language=${TTFA_LANG}"
     "qwen3tts|qwen3tts|bezzam/evals-qwentts|Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice|--speaker=Aiden --mode=custom_voice --language=${TTFA_LANG}"
     # The same checkpoint under andimarafioti/faster-qwen3-tts (CUDA graphs, incremental audio).
@@ -185,7 +187,7 @@ TTFA_TARGETS=(
 )
 
 # Backends whose run_eval.py has no --voice_clone flag at all; passing one would be an error.
-NO_CLONE_FLAG="inflect-nano inflect-v2 kokoro lfm2-audio magpie-tts photon qwen3tts qwen3tts-fast supertonic vibevoice_realtime voxtral-tts"
+NO_CLONE_FLAG="inflect-nano inflect-v2 kokoro lfm2-audio magpie-tts paradee photon qwen3tts qwen3tts-fast supertonic vibevoice_realtime voxtral-tts"
 
 submit_one() {
     local backend="$1" space="$2" model_id="$3" extra="$4" engine="$5"
