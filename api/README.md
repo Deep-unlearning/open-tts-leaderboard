@@ -1,12 +1,12 @@
 # API TTS evaluation
 
-This backend evaluates hosted TTS services using the same Seed-TTS/CV3 text, Qwen3-ASR transcription, language-specific normalization and optional WavLM speaker similarity as the other backends. Generation runs locally on CPU; only ASR and similarity scoring use Hugging Face Jobs. Provider adapters follow the [Open ASR Leaderboard API organization](https://github.com/huggingface/open_asr_leaderboard/tree/main/api).
+This backend evaluates hosted TTS services using the same Seed-TTS/CV3 text, Qwen3-ASR transcription, language-specific normalization and optional WavLM speaker similarity as the other backends. Generation runs locally in CPU Docker containers; only ASR and similarity scoring use Hugging Face Jobs. Provider adapters follow the [Open ASR Leaderboard API organization](https://github.com/huggingface/open_asr_leaderboard/tree/main/api).
 
 API generation measures a client request, including networking, provider queuing and retries. It writes `time: null` so the shared scorer cannot turn those timings into H200 RTFx. Quality scores and API timing summaries are exported to `api/results/API_RESULTS.csv` and `API_RESULTS.json`; no unmeasured leaderboard rows are created.
 
 ## Setup
 
-Use Python 3.10 or newer. From the repository root:
+Use a running Docker daemon and Python 3.10 or newer on the host. The host Python dependencies and `hf` CLI are still needed for orchestration, bucket sync, Jobs and score export. From the repository root:
 
 ```bash
 python -m venv .venv-api
@@ -15,7 +15,9 @@ pip install -r api/requirements.txt
 python api/run_eval.py --list_models
 ```
 
-Set the key for the provider being evaluated. Keys stay in the local generation process; scorer Jobs receive only `HF_TOKEN`.
+Direct `python api/run_eval.py` is a low-level development entry point using host dependencies. Use `api/submit_jobs.sh` below for Docker generation and the complete pipeline.
+
+Set the key for the provider being evaluated. The wrapper passes `HF_TOKEN` and the selected provider key to the generation container by environment-variable name, keeping their values out of image builds and printed commands. Scorer Jobs receive only `HF_TOKEN`.
 
 | Provider | Environment variable | Default voice |
 | --- | --- | --- |
@@ -44,7 +46,9 @@ For ASR/SIM, use a dedicated API bucket and an account with HF Jobs access. `RES
 
 ## Run
 
-Commands below run from the repository root. The wrapper changes into `api/`, giving every stage the same `api/results/` output tree. `MAX_WORKERS=1` is the default and should be retained for comparable request latency.
+Commands below run from the repository root. When `generate` is selected, the wrapper builds `open-tts-api-eval` once with `api/Dockerfile`, then runs a container for each model/split from `/app/api`. Containers use the host UID/GID and bind-mount writable `api/results/` at `/app/api/results` so every stage shares the same output tree. `MAX_WORKERS=1` is the default and should be retained for comparable request latency.
+
+Set `API_IMAGE` or `--api_image` to change the image tag; pass `--skip_image_build` to reuse an already built image. The host cache is selected by `HF_CACHE_DIR`, then `HF_HOME`, then `~/.cache/huggingface`, and mounted at `/hf_cache`. Dataset and Hub caches use `/hf_cache/datasets_tts_api` and `/hf_cache/hub`, respectively.
 
 Eight-sample generation smoke test for one model and the English Seed-TTS split:
 
@@ -93,7 +97,7 @@ MODEL=fish/s2.1-pro VOICE_CLONE=true STAGES="transcribe sim score" \
 
 Scorer Jobs use the shared public `bezzam/evals` image, inject this checkout's scorer scripts and default to `l4x1`. `SPACE`, `ASR_FLAVOR`, `SIM_FLAVOR`, `ASR_BATCH_SIZE`, `SIM_BATCH_SIZE`, `MAX_AUDIO_SECONDS` and `SIM_BACKEND` have the same meanings as in the existing backend pipelines. The default SIM backend is `wavlm_seed_tts`; its scores are separate from `xvector` scores. API manifests record SHA-256 hashes of the generated and reference WAVs. SIM resumes reuse a prior score only when both hashes match, including forks retained in the bucket after a generation-only overwrite. Older API rows without these hashes are recomputed. Result export rejects stale SIM forks.
 
-Inspect the planned commands without API calls, uploads or Jobs:
+Inspect the planned Docker build/run and scoring commands without filesystem writes, API calls, uploads or Jobs:
 
 ```bash
 MODEL=elevenlabs/eleven_v4 RESULTS_BUCKET=your-org/tts-api-results \
@@ -125,7 +129,7 @@ python api/score_results.py --model_id elevenlabs/eleven_v4
 
 Each manifest is scored with its recorded language. Exports retain completed measured results from earlier models, keyed by model/dataset/split/cloning mode, and include sample coverage. Incomplete generation, missing ASR and unfinished cloning SIM are rejected; partial runs remain in their manifests/metadata until resumed. Use these API exports for review; the generic H200 result publisher is not an API timing publishing path.
 
-A private-data-free generation smoke test can use a local JSONL with `id`, `text`, and, for reference-based models, `prompt_audio_filepath` and `prompt_text`. Paths in that file should be absolute:
+A private-data-free generation smoke test can use a local JSONL with `id`, `text`, and, for reference-based models, `prompt_audio_filepath` and `prompt_text`. Paths in that file should be absolute. The wrapper mounts the JSONL and its prompt audio files read-only at the expected absolute paths inside the container, preserving path aliases such as macOS `/tmp`:
 
 ```bash
 MODEL=elevenlabs/eleven_v4 STAGES=generate \

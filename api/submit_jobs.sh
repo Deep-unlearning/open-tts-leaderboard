@@ -1,5 +1,5 @@
 #!/bin/bash
-# API generation runs locally on CPU; only ASR/SIM use HF Jobs.
+# API generation runs in local Docker; only ASR/SIM use HF Jobs.
 # Compatible with macOS's Bash 3.2 (no GNU base64 or associative arrays).
 set -euo pipefail
 API_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

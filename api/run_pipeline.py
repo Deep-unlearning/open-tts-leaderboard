@@ -1,4 +1,4 @@
-"""CPU API generation followed by the leaderboard's shared ASR/SIM HF Jobs.
+"""Local Docker API generation followed by the leaderboard's shared ASR/SIM HF Jobs.
 
 API results use their own bucket and report network timings separately from H200 RTFx.
 All subprocess arguments are lists; injected job scripts quote paths and values.
@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -58,9 +60,31 @@ def manifest_path(model_id: str, config: DatasetConfig, voice_clone: bool = Fals
     return API_DIR / "results" / model_safe / name
 
 
+def cache_directory() -> Path:
+    return Path(os.environ.get("HF_CACHE_DIR") or os.environ.get("HF_HOME") or
+                Path.home() / ".cache" / "huggingface").expanduser().resolve()
+
+
+def fixture_mounts(source: Path) -> list[tuple[Path, Path]]:
+    """Resolve host files while preserving reference path aliases inside Docker."""
+    mounts = {source: source}
+    for line in source.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        reference = json.loads(line).get("prompt_audio_filepath")
+        if reference:
+            path = Path(reference)
+            path = path if path.is_absolute() else source.parent / path
+            mounts[Path(os.path.abspath(path))] = path.resolve()
+    return [(host, destination) for destination, host in sorted(mounts.items())]
+
+
 def generation_command(args, model_id: str, config: DatasetConfig) -> list[str]:
+    from api.models import get_model
+    from api.providers import KEY_ENV
+
     command = [
-        sys.executable, str(API_DIR / "run_eval.py"),
+        "python", "/app/api/run_eval.py",
         "--model_id", model_id, "--dataset_path", config.path,
         "--dataset", config.dataset, "--split", config.split,
         "--language", config.language, "--max_eval_samples", str(args.max_eval_samples),
@@ -78,7 +102,25 @@ def generation_command(args, model_id: str, config: DatasetConfig) -> list[str]:
         command.extend(("--ttfa_probe", str(args.ttfa_probe)))
     if args.input_jsonl:
         command.extend(("--input_jsonl", str(Path(args.input_jsonl).resolve())))
-    return command
+    docker = ["docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}",
+              "--volume", f"{API_DIR / 'results'}:/app/api/results",
+              "--volume", f"{cache_directory()}:/hf_cache",
+              "--env", "HF_TOKEN", "--env", KEY_ENV[get_model(model_id).provider]]
+    if args.input_jsonl:
+        for host, destination in fixture_mounts(Path(args.input_jsonl).resolve()):
+            docker.extend(("--volume", f"{host}:{destination}:ro"))
+    return [*docker, args.api_image, *command]
+
+
+def prepare_generation(args):
+    if not args.dry_run:
+        if not shutil.which("docker"):
+            raise ValueError("Docker is required for API generation; install Docker and start its daemon")
+        (API_DIR / "results").mkdir(parents=True, exist_ok=True)
+        cache_directory().mkdir(parents=True, exist_ok=True)
+    if not args.skip_image_build:
+        run_command(["docker", "build", "--file", str(API_DIR / "Dockerfile"),
+                     "--tag", args.api_image, str(REPO_ROOT)], dry_run=args.dry_run)
 
 
 def injected_script(source: Path, target: str) -> str:
@@ -177,6 +219,7 @@ def run_pipeline(args):
     from api.models import get_model
 
     validate_args(args)
+    generation_prepared = False
     for model_id in args.models:
         model = get_model(model_id)
         configs = [config for config in dataset_configs(args) if config.language in model.languages]
@@ -185,6 +228,9 @@ def run_pipeline(args):
             continue
         manifests = [manifest_path(model_id, config, args.voice_clone) for config in configs]
         if "generate" in args.stages:
+            if not generation_prepared:
+                prepare_generation(args)
+                generation_prepared = True
             for config in configs:
                 run_command(generation_command(args, model_id, config), dry_run=args.dry_run)
         remote_stages = [stage for stage in ("transcribe", "sim") if stage in args.stages and (stage != "sim" or args.voice_clone)]
@@ -229,6 +275,9 @@ def make_parser():
     parser.add_argument("--voice")
     parser.add_argument("--ttfa_probe", type=int, default=0)
     parser.add_argument("--input_jsonl", help="Local en JSONL for a generation smoke test")
+    parser.add_argument("--api_image", default=os.environ.get("API_IMAGE", "open-tts-api-eval"),
+                        help="Local Docker image tag for API generation (API_IMAGE)")
+    parser.add_argument("--skip_image_build", action="store_true", help="Use an already-built local API image")
     parser.add_argument("--results_bucket", default=os.environ.get("RESULTS_BUCKET", ""))
     parser.add_argument("--org_name", default=os.environ.get("ORG_NAME", ""))
     parser.add_argument("--scorer_space", default=os.environ.get("SPACE", "bezzam/evals"))

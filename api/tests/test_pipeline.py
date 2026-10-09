@@ -21,8 +21,8 @@ class PipelineTests(unittest.TestCase):
     def setUp(self):
         self.models = ModuleType("api.models")
         self.models.MODELS = {
-            "fish/s2-pro": SimpleNamespace(languages=("en", "zh", "fr"), reference_mode="inline"),
-            "example/voice": SimpleNamespace(languages=("en",), reference_mode=None),
+            "fish/s2-pro": SimpleNamespace(provider="fish", languages=("en", "zh", "fr"), reference_mode="inline"),
+            "example/voice": SimpleNamespace(provider="deepgram", languages=("en",), reference_mode=None),
         }
         self.models.get_model = self.models.MODELS.__getitem__
         self.modules_patch = patch.dict(sys.modules, {"api.models": self.models})
@@ -41,7 +41,8 @@ class PipelineTests(unittest.TestCase):
         config = run_pipeline.dataset_configs(args)[0]
         command = run_pipeline.generation_command(args, "fish/s2-pro", config)
         self.assertEqual(command[command.index("--max_eval_samples") + 1], "8")
-        self.assertNotIn("HF_TOKEN", command)
+        self.assertEqual(command[:3], ["docker", "run", "--rm"])
+        self.assertIn("HF_TOKEN", command)
 
     def test_remote_stages_require_separate_explicit_bucket(self):
         with self.assertRaisesRegex(ValueError, "dedicated API"):
@@ -78,16 +79,85 @@ class PipelineTests(unittest.TestCase):
         with patch.object(run_pipeline, "run_command") as runner:
             run_pipeline.run_pipeline(args)
         commands = [call.args[0] for call in runner.call_args_list]
-        self.assertEqual(len(commands), 6)
-        self.assertTrue(commands[0][1].endswith("run_eval.py"))
-        self.assertEqual(commands[1][:3], ["hf", "buckets", "sync"])
-        self.assertEqual(commands[2][:3], ["hf", "jobs", "run"])
-        self.assertIn("--asr_language en", commands[2][-1])
-        self.assertIn("--overwrite", commands[2][-1])
-        self.assertIn("--sim_backend wavlm_seed_tts", commands[3][-1])
-        self.assertEqual(commands[4][-2:], ["--exclude", "*.wav"])
-        self.assertNotIn("--delete", commands[4])
-        self.assertTrue(commands[5][1].endswith("score_results.py"))
+        self.assertEqual(len(commands), 7)
+        self.assertEqual(commands[0][:2], ["docker", "build"])
+        self.assertEqual(commands[1][:3], ["docker", "run", "--rm"])
+        self.assertIn("/app/api/run_eval.py", commands[1])
+        self.assertEqual(commands[2][:3], ["hf", "buckets", "sync"])
+        self.assertEqual(commands[3][:3], ["hf", "jobs", "run"])
+        self.assertIn("--asr_language en", commands[3][-1])
+        self.assertIn("--overwrite", commands[3][-1])
+        self.assertIn("--sim_backend wavlm_seed_tts", commands[4][-1])
+        self.assertEqual(commands[5][-2:], ["--exclude", "*.wav"])
+        self.assertNotIn("--delete", commands[5])
+        self.assertTrue(commands[6][1].endswith("score_results.py"))
+
+    def test_generation_credentials_stay_out_of_logged_arguments(self):
+        args = self.args("--stages", "generate")
+        with patch.dict(os.environ, {"HF_TOKEN": "hf-test-secret", "FISH_API_KEY": "fish-test-secret",
+                                     "DEEPGRAM_API_KEY": "unused-secret"}):
+            command = run_pipeline.generation_command(args, "fish/s2-pro", run_pipeline.dataset_configs(args)[0])
+        self.assertIn("FISH_API_KEY", command)
+        self.assertNotIn("DEEPGRAM_API_KEY", command)
+        self.assertFalse(any("secret" in part for part in command))
+
+    def test_generation_mounts_persistent_results_cache_and_host_identity(self):
+        args = self.args("--stages", "generate")
+        with tempfile.TemporaryDirectory(prefix="tts cache ") as cache, patch.dict(os.environ, {"HF_CACHE_DIR": cache}):
+            command = run_pipeline.generation_command(args, "fish/s2-pro", run_pipeline.dataset_configs(args)[0])
+        self.assertIn(f"{Path(cache).resolve()}:/hf_cache", command)
+        self.assertIn(f"{API_DIR / 'results'}:/app/api/results", command)
+        self.assertEqual(command[command.index("--user") + 1], f"{os.getuid()}:{os.getgid()}")
+
+    def test_local_fixture_and_external_references_are_readable_in_container(self):
+        with tempfile.TemporaryDirectory(prefix="tts fixture ") as folder:
+            root = Path(folder).resolve()
+            source = root / "samples.jsonl"
+            source.write_text(json.dumps({"text": "hello", "prompt_audio_filepath": "refs/prompt.wav"}) + "\n" +
+                              json.dumps({"text": "hello", "prompt_audio_filepath": str(root / "external/prompt.wav")}) + "\n")
+            args = self.args("--stages", "generate", "--datasets", "seed_tts", "--only_langs", "en",
+                             "--input_jsonl", str(source))
+            command = run_pipeline.generation_command(args, "fish/s2-pro", run_pipeline.dataset_configs(args)[0])
+        for path in (source, root / "refs/prompt.wav", root / "external/prompt.wav"):
+            self.assertIn(f"{path}:{path}:ro", command)
+        self.assertEqual(command[command.index("--input_jsonl") + 1], str(source))
+
+    def test_fixture_reference_symlinks_preserve_the_container_path_alias(self):
+        with tempfile.TemporaryDirectory(prefix="tts symlink ") as folder:
+            root = Path(folder).resolve()
+            reference = root / "reference.wav"
+            reference.write_bytes(b"reference")
+            alias = root / "prompt.wav"
+            alias.symlink_to(reference)
+            source = root / "samples.jsonl"
+            source.write_text(json.dumps({"text": "hello", "prompt_audio_filepath": str(alias)}) + "\n")
+            args = self.args("--stages", "generate", "--input_jsonl", str(source))
+            command = run_pipeline.generation_command(args, "fish/s2-pro", run_pipeline.dataset_configs(args)[0])
+        self.assertIn(f"{reference}:{alias}:ro", command)
+
+    def test_dry_run_builds_once_across_models_and_writes_no_directories(self):
+        args = run_pipeline.make_parser().parse_args(["--models", "fish/s2-pro", "example/voice", "--stages", "generate",
+                                                     "--datasets", "seed_tts", "--only_langs", "en", "--dry_run"])
+        with patch.object(run_pipeline, "run_command") as runner, patch.object(Path, "mkdir") as mkdir:
+            run_pipeline.run_pipeline(args)
+        commands = [call.args[0] for call in runner.call_args_list]
+        self.assertEqual([command[:2] for command in commands], [["docker", "build"], ["docker", "run"], ["docker", "run"]])
+        mkdir.assert_not_called()
+
+    def test_prebuilt_image_skips_build_and_uses_custom_tag(self):
+        args = self.args("--stages", "generate", "--datasets", "seed_tts", "--only_langs", "en", "--dry_run",
+                         "--skip_image_build", "--api_image", "custom-api:tested")
+        with patch.object(run_pipeline, "run_command") as runner:
+            run_pipeline.run_pipeline(args)
+        self.assertEqual(runner.call_count, 1)
+        self.assertIn("custom-api:tested", runner.call_args.args[0])
+
+    def test_missing_docker_fails_before_generation_or_directory_creation(self):
+        args = self.args("--stages", "generate")
+        with (patch.object(run_pipeline.shutil, "which", return_value=None), patch.object(Path, "mkdir") as mkdir,
+              self.assertRaisesRegex(ValueError, "Docker is required")):
+            run_pipeline.run_pipeline(args)
+        mkdir.assert_not_called()
 
     def test_remote_only_downloads_bucket_manifests_without_uploading_stale_local_state(self):
         args = self.args("--datasets", "seed_tts", "--only_langs", "en", "--results_bucket", "test/api-results",
@@ -98,6 +168,7 @@ class PipelineTests(unittest.TestCase):
         syncs = [command for command in commands if command[:3] == ["hf", "buckets", "sync"]]
         self.assertEqual(len(syncs), 2)
         self.assertTrue(all(command[3].startswith("hf://buckets/") for command in syncs))
+        self.assertFalse(any(command[0] == "docker" for command in commands))
 
     def test_full_split_ttfa_works_only_without_scorer_stages(self):
         args = self.args("--stages", "generate", "--ttfa_probe=-1")
