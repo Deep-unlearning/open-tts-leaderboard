@@ -80,7 +80,7 @@ class PipelineTests(unittest.TestCase):
             run_pipeline.run_pipeline(args)
         commands = [call.args[0] for call in runner.call_args_list]
         self.assertEqual(len(commands), 7)
-        self.assertEqual(commands[0][:2], ["docker", "build"])
+        self.assertEqual(commands[0][:2], ["docker", "pull"])
         self.assertEqual(commands[1][:3], ["docker", "run", "--rm"])
         self.assertIn("/app/api/run_eval.py", commands[1])
         self.assertEqual(commands[2][:3], ["hf", "buckets", "sync"])
@@ -107,6 +107,11 @@ class PipelineTests(unittest.TestCase):
             command = run_pipeline.generation_command(args, "fish/s2-pro", run_pipeline.dataset_configs(args)[0])
         self.assertIn(f"{Path(cache).resolve()}:/hf_cache", command)
         self.assertIn(f"{API_DIR / 'results'}:/app/api/results", command)
+        self.assertIn(f"{API_DIR}:/app/api:ro", command)
+        self.assertIn(f"{run_pipeline.REPO_ROOT / 'scripts'}:/app/scripts:ro", command)
+        self.assertEqual(command[command.index("--entrypoint") + 1], "python")
+        self.assertEqual(command[command.index("--workdir") + 1], "/app/api")
+        self.assertEqual(command[command.index("--platform") + 1], "linux/amd64")
         self.assertEqual(command[command.index("--user") + 1], f"{os.getuid()}:{os.getgid()}")
 
     def test_local_fixture_and_external_references_are_readable_in_container(self):
@@ -135,22 +140,59 @@ class PipelineTests(unittest.TestCase):
             command = run_pipeline.generation_command(args, "fish/s2-pro", run_pipeline.dataset_configs(args)[0])
         self.assertIn(f"{reference}:{alias}:ro", command)
 
-    def test_dry_run_builds_once_across_models_and_writes_no_directories(self):
+    def test_dry_run_pulls_once_across_models_and_writes_no_directories(self):
         args = run_pipeline.make_parser().parse_args(["--models", "fish/s2-pro", "example/voice", "--stages", "generate",
                                                      "--datasets", "seed_tts", "--only_langs", "en", "--dry_run"])
         with patch.object(run_pipeline, "run_command") as runner, patch.object(Path, "mkdir") as mkdir:
             run_pipeline.run_pipeline(args)
         commands = [call.args[0] for call in runner.call_args_list]
-        self.assertEqual([command[:2] for command in commands], [["docker", "build"], ["docker", "run"], ["docker", "run"]])
+        self.assertEqual([command[:2] for command in commands], [["docker", "pull"], ["docker", "run"], ["docker", "run"]])
         mkdir.assert_not_called()
 
-    def test_prebuilt_image_skips_build_and_uses_custom_tag(self):
+    def test_cached_image_skips_pull_and_uses_exact_digest(self):
+        image = "registry.hf.space/example-env@sha256:" + "a" * 64
         args = self.args("--stages", "generate", "--datasets", "seed_tts", "--only_langs", "en", "--dry_run",
-                         "--skip_image_build", "--api_image", "custom-api:tested")
+                         "--skip_image_pull", "--api_image", image)
         with patch.object(run_pipeline, "run_command") as runner:
             run_pipeline.run_pipeline(args)
         self.assertEqual(runner.call_count, 1)
-        self.assertIn("custom-api:tested", runner.call_args.args[0])
+        self.assertIn(image, runner.call_args.args[0])
+
+    def test_default_and_custom_spaces_resolve_to_hub_registry_images(self):
+        args = self.args("--stages", "generate")
+        self.assertEqual(run_pipeline.generation_image(args), "registry.hf.space/hf-audio-open-tts-leaderboard-apis:latest")
+        args.tts_space = "Example/tts_api"
+        self.assertEqual(run_pipeline.generation_image(args), "registry.hf.space/example-tts-api:latest")
+        args.tts_space = "invalid-space"
+        with self.assertRaisesRegex(ValueError, "exact reference"):
+            run_pipeline.validate_args(args)
+
+    def test_registry_failure_builds_from_the_exact_hub_space_commit(self):
+        args = self.args("--stages", "generate")
+        info = SimpleNamespace(sdk="docker", private=False, sha="a" * 40)
+        failure = run_pipeline.subprocess.CalledProcessError(1, ["docker", "pull"])
+        with (patch.object(run_pipeline.shutil, "which", return_value="docker"), patch.object(Path, "mkdir"),
+              patch("huggingface_hub.HfApi") as hub, patch.object(run_pipeline, "run_command", side_effect=[failure, None, None]) as runner):
+            hub.return_value.space_info.return_value = info
+            run_pipeline.prepare_generation(args)
+        hub.return_value.space_info.assert_called_once_with(run_pipeline.DEFAULT_TTS_SPACE)
+        download, build = [call.args[0] for call in runner.call_args_list[1:]]
+        self.assertEqual(download[:3], ["hf", "download", run_pipeline.DEFAULT_TTS_SPACE])
+        self.assertEqual(download[download.index("--revision") + 1], info.sha)
+        self.assertEqual(build[:2], ["docker", "build"])
+        self.assertEqual(Path(build[-1]).name, info.sha)
+        self.assertEqual(build[build.index("--platform") + 1], "linux/amd64")
+        self.assertEqual(build[build.index("--tag") + 1], run_pipeline.generation_image(args))
+
+    def test_explicit_image_pull_failure_does_not_substitute_a_space_build(self):
+        args = self.args("--stages", "generate", "--api_image", "registry.example/env@sha256:" + "a" * 64)
+        failure = run_pipeline.subprocess.CalledProcessError(1, ["docker", "pull"])
+        with (patch.object(run_pipeline.shutil, "which", return_value="docker"), patch.object(Path, "mkdir"),
+              patch.object(run_pipeline, "run_command", side_effect=failure),
+              patch.object(run_pipeline, "build_space_environment") as fallback,
+              self.assertRaises(run_pipeline.subprocess.CalledProcessError)):
+            run_pipeline.prepare_generation(args)
+        fallback.assert_not_called()
 
     def test_missing_docker_fails_before_generation_or_directory_creation(self):
         args = self.args("--stages", "generate")

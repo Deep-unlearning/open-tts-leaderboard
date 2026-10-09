@@ -230,7 +230,3 @@ Dockerfile.*
 
 # Backend Dockerfiles live in their HF Spaces, not in this repo.
 Dockerfile
-
-# API generation builds its image locally, unlike the HF Jobs backends.
-!/api/Dockerfile
-!/api/Dockerfile.dockerignore

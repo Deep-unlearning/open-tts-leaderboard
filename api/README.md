@@ -46,9 +46,13 @@ For ASR/SIM, use a dedicated API bucket and an account with HF Jobs access. `RES
 
 ## Run
 
-Commands below run from the repository root. When `generate` is selected, the wrapper builds `open-tts-api-eval` once with `api/Dockerfile`, then runs a container for each model/split from `/app/api`. Containers use the host UID/GID and bind-mount writable `api/results/` at `/app/api/results` so every stage shares the same output tree. `MAX_WORKERS=1` is the default and should be retained for comparable request latency.
+Commands below run from the repository root. When `generate` is selected, the wrapper tries to pull `registry.hf.space/hf-audio-open-tts-leaderboard-apis:latest` once, then runs a local container for each model/split. It overrides the image entrypoint with Python and uses `/app/api` as the working directory. Containers use the host UID/GID, mount this checkout's `api/` and shared scripts read-only at `/app/api` and `/app/scripts`, and overlay writable `api/results/` at `/app/api/results`. `MAX_WORKERS=1` is the default and should be retained for comparable request latency.
 
-Set `API_IMAGE` or `--api_image` to change the image tag; pass `--skip_image_build` to reuse an already built image. The host cache is selected by `HF_CACHE_DIR`, then `HF_HOME`, then `~/.cache/huggingface`, and mounted at `/hf_cache`. Dataset and Hub caches use `/hf_cache/datasets_tts_api` and `/hf_cache/hub`, respectively.
+The shared environment lives in the public [API environment Space](https://huggingface.co/spaces/hf-audio/open-tts-leaderboard-apis). Update its Dockerfile and requirements to change dependencies; the Hub builds the registry image. If the registry pull fails, the wrapper resolves the public Docker Space's exact commit, downloads that revision with `hf download --revision`, and builds the environment locally under the same image tag. The downloaded source is cached at `<HF cache>/tts_api_spaces/<owner>--<space>/<commit SHA>`; the Dockerfile is maintained solely in the Hub Space.
+
+Set `TTS_SPACE` or `--tts_space` to select another environment Space. `API_IMAGE` or `--api_image` overrides the registry reference, including an exact tag or digest. Explicit image references disable the fallback and fail if pulling fails. `--skip_image_pull` reuses a cached image, whether pulled or built from the Space. `API_DOCKER_PLATFORM` or `--docker_platform` defaults to `linux/amd64`, matching the Hub build; Apple Silicon runs this image through Docker's emulation.
+
+The host cache is selected by `HF_CACHE_DIR`, then `HF_HOME`, then `~/.cache/huggingface`, and mounted at `/hf_cache`. Dataset and Hub caches use `/hf_cache/datasets_tts_api` and `/hf_cache/hub`, respectively.
 
 Eight-sample generation smoke test for one model and the English Seed-TTS split:
 
@@ -97,7 +101,7 @@ MODEL=fish/s2.1-pro VOICE_CLONE=true STAGES="transcribe sim score" \
 
 Scorer Jobs use the shared public `bezzam/evals` image, inject this checkout's scorer scripts and default to `l4x1`. `SPACE`, `ASR_FLAVOR`, `SIM_FLAVOR`, `ASR_BATCH_SIZE`, `SIM_BATCH_SIZE`, `MAX_AUDIO_SECONDS` and `SIM_BACKEND` have the same meanings as in the existing backend pipelines. The default SIM backend is `wavlm_seed_tts`; its scores are separate from `xvector` scores. API manifests record SHA-256 hashes of the generated and reference WAVs. SIM resumes reuse a prior score only when both hashes match, including forks retained in the bucket after a generation-only overwrite. Older API rows without these hashes are recomputed. Result export rejects stale SIM forks.
 
-Inspect the planned Docker build/run and scoring commands without filesystem writes, API calls, uploads or Jobs:
+Inspect the planned Docker pull/run and scoring commands without filesystem writes, API calls, uploads or Jobs:
 
 ```bash
 MODEL=elevenlabs/eleven_v4 RESULTS_BUCKET=your-org/tts-api-results \

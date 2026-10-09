@@ -23,6 +23,7 @@ sys.path.insert(0, str(REPO_ROOT))
 BENCHMARK_LANGUAGES = ("en", "fr", "es", "zh", "ja", "ko", "de", "it", "ru")
 STAGES = ("generate", "transcribe", "sim", "score")
 H200_BUCKET = "hf-audio/tts_leaderboard_h200"
+DEFAULT_TTS_SPACE = "hf-audio/open-tts-leaderboard-apis"
 
 
 @dataclass(frozen=True)
@@ -79,12 +80,21 @@ def fixture_mounts(source: Path) -> list[tuple[Path, Path]]:
     return [(host, destination) for destination, host in sorted(mounts.items())]
 
 
+def generation_image(args) -> str:
+    if args.api_image:
+        return args.api_image
+    slug = args.tts_space.lower().replace("/", "-").replace("_", "-").replace(".", "-")
+    if len(args.tts_space.split("/")) != 2 or len(slug) > 63:
+        raise ValueError("Use --tts_space OWNER/SPACE, or --api_image with the exact reference from Run with Docker")
+    return f"registry.hf.space/{slug}:latest"
+
+
 def generation_command(args, model_id: str, config: DatasetConfig) -> list[str]:
     from api.models import get_model
     from api.providers import KEY_ENV
 
     command = [
-        "python", "/app/api/run_eval.py",
+        "/app/api/run_eval.py",
         "--model_id", model_id, "--dataset_path", config.path,
         "--dataset", config.dataset, "--split", config.split,
         "--language", config.language, "--max_eval_samples", str(args.max_eval_samples),
@@ -102,14 +112,17 @@ def generation_command(args, model_id: str, config: DatasetConfig) -> list[str]:
         command.extend(("--ttfa_probe", str(args.ttfa_probe)))
     if args.input_jsonl:
         command.extend(("--input_jsonl", str(Path(args.input_jsonl).resolve())))
-    docker = ["docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}",
+    docker = ["docker", "run", "--rm", "--platform", args.docker_platform,
+              "--entrypoint", "python", "--workdir", "/app/api", "--user", f"{os.getuid()}:{os.getgid()}",
+              "--volume", f"{API_DIR}:/app/api:ro",
+              "--volume", f"{REPO_ROOT / 'scripts'}:/app/scripts:ro",
               "--volume", f"{API_DIR / 'results'}:/app/api/results",
               "--volume", f"{cache_directory()}:/hf_cache",
               "--env", "HF_TOKEN", "--env", KEY_ENV[get_model(model_id).provider]]
     if args.input_jsonl:
         for host, destination in fixture_mounts(Path(args.input_jsonl).resolve()):
             docker.extend(("--volume", f"{host}:{destination}:ro"))
-    return [*docker, args.api_image, *command]
+    return [*docker, generation_image(args), *command]
 
 
 def prepare_generation(args):
@@ -118,9 +131,29 @@ def prepare_generation(args):
             raise ValueError("Docker is required for API generation; install Docker and start its daemon")
         (API_DIR / "results").mkdir(parents=True, exist_ok=True)
         cache_directory().mkdir(parents=True, exist_ok=True)
-    if not args.skip_image_build:
-        run_command(["docker", "build", "--file", str(API_DIR / "Dockerfile"),
-                     "--tag", args.api_image, str(REPO_ROOT)], dry_run=args.dry_run)
+    if not args.skip_image_pull:
+        try:
+            run_command(["docker", "pull", "--platform", args.docker_platform, generation_image(args)], dry_run=args.dry_run)
+        except subprocess.CalledProcessError:
+            if args.api_image:
+                # An explicit image/digest must never be replaced with a different build.
+                raise
+            build_space_environment(args)
+
+
+def build_space_environment(args):
+    """Use the Space's pinned source when its public registry image is unavailable."""
+    from huggingface_hub import HfApi
+
+    info = HfApi().space_info(args.tts_space)
+    if info.sdk != "docker" or info.private:
+        raise ValueError("TTS_SPACE must be a public Docker environment Space")
+    source = cache_directory() / "tts_api_spaces" / args.tts_space.replace("/", "--") / info.sha
+    print(f"Space registry image unavailable; building {args.tts_space}@{info.sha} from Hub source", flush=True)
+    run_command(["hf", "download", args.tts_space, "--repo-type", "space", "--revision", info.sha,
+                 "--local-dir", str(source)])
+    run_command(["docker", "build", "--platform", args.docker_platform, "--file", str(source / "Dockerfile"),
+                 "--tag", generation_image(args), str(source)])
 
 
 def injected_script(source: Path, target: str) -> str:
@@ -186,6 +219,8 @@ def validate_args(args):
 
     if not args.stages or any(stage not in STAGES for stage in args.stages):
         raise ValueError("--stages must be a nonempty subset of: " + " ".join(STAGES))
+    if "generate" in args.stages:
+        generation_image(args)
     if args.max_workers < 1:
         raise ValueError("--max_workers must be >= 1")
     if args.max_eval_samples == 0 or args.max_eval_samples < -1:
@@ -275,9 +310,13 @@ def make_parser():
     parser.add_argument("--voice")
     parser.add_argument("--ttfa_probe", type=int, default=0)
     parser.add_argument("--input_jsonl", help="Local en JSONL for a generation smoke test")
-    parser.add_argument("--api_image", default=os.environ.get("API_IMAGE", "open-tts-api-eval"),
-                        help="Local Docker image tag for API generation (API_IMAGE)")
-    parser.add_argument("--skip_image_build", action="store_true", help="Use an already-built local API image")
+    parser.add_argument("--tts_space", default=os.environ.get("TTS_SPACE", DEFAULT_TTS_SPACE),
+                        help="Public Docker Space providing the API environment (TTS_SPACE)")
+    parser.add_argument("--api_image", default=os.environ.get("API_IMAGE"),
+                        help="Exact registry image reference/digest; overrides --tts_space (API_IMAGE)")
+    parser.add_argument("--docker_platform", default=os.environ.get("API_DOCKER_PLATFORM", "linux/amd64"),
+                        help="Docker platform; Hub Space images use linux/amd64 (API_DOCKER_PLATFORM)")
+    parser.add_argument("--skip_image_pull", action="store_true", help="Use the cached Space image without pulling it again")
     parser.add_argument("--results_bucket", default=os.environ.get("RESULTS_BUCKET", ""))
     parser.add_argument("--org_name", default=os.environ.get("ORG_NAME", ""))
     parser.add_argument("--scorer_space", default=os.environ.get("SPACE", "bezzam/evals"))
