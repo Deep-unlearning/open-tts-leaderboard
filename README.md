@@ -137,6 +137,14 @@ flowchart LR
    - **RTFx**: total audio duration divided by total generation time, measured in stage 1
    - **SIM**: mean speaker similarity, for voice cloning only
 
+The English and multilingual WER normalizers preserve spoken text inside parentheses and brackets
+on both references and ASR predictions. Only explicit non-speech tags (`laugh`, `laughs`,
+`laughing`, `laughter`, `cough`, `coughs`, `coughing`, `unk`) are removed when enclosed; ordinary
+phrases, acronyms and quantities remain part of the score. CJK scoring already preserves enclosed
+text. After a normalization change, existing JSONL manifests can be rescored without rerunning
+generation or ASR. To inspect raw bracketed text, run
+`python scripts/audit_bracketed_text.py results/<model> --output /tmp/bracket_audit.json`.
+
 The stages are separate jobs because the TTS, ASR and speaker-similarity models have conflicting dependencies: stage 1 uses the backend's own Docker Space image, and stages 2 and 3 share [bezzam/evals](https://huggingface.co/spaces/bezzam/evals).
 
 | Stage | Flavor | Hardware |
