@@ -137,14 +137,6 @@ flowchart LR
    - **RTFx**: total audio duration divided by total generation time, measured in stage 1
    - **SIM**: mean speaker similarity, for voice cloning only
 
-The English and multilingual WER normalizers preserve spoken text inside parentheses and brackets
-on both references and ASR predictions. Only explicit non-speech tags (`laugh`, `laughs`,
-`laughing`, `laughter`, `cough`, `coughs`, `coughing`, `unk`) are removed when enclosed; ordinary
-phrases, acronyms and quantities remain part of the score. CJK scoring already preserves enclosed
-text. After a normalization change, existing JSONL manifests can be rescored without rerunning
-generation or ASR. To inspect raw bracketed text, run
-`python scripts/audit_bracketed_text.py results/<model> --output /tmp/bracket_audit.json`.
-
 The stages are separate jobs because the TTS, ASR and speaker-similarity models have conflicting dependencies: stage 1 uses the backend's own Docker Space image, and stages 2 and 3 share [bezzam/evals](https://huggingface.co/spaces/bezzam/evals).
 
 | Stage | Flavor | Hardware |
@@ -273,6 +265,25 @@ TTFA_DEVICE=cpu bash submit_ttfa_jobs.sh kokoro
 To add a model, implement `--ttfa_probe` in its `run_eval.py` (see [scripts/ttfa_probe.py](scripts/ttfa_probe.py)) and add it to `TTFA_TARGETS` in [submit_ttfa_jobs.sh](submit_ttfa_jobs.sh).
 
 The leaderboard reports the p50 and p95 TTFA and the batch-1 RTFx (`python scripts/open_results_pr.py --model_id <model> --targets streaming`). **Batch-1 RTFx is not the leaderboard RTFx**, which is measured at each backend's real batch size.
+
+
+## Miscellaneous
+
+#### Normalizer changes
+
+After a normalization change, existing JSONL manifests can be rescored without rerunning generation or ASR: manifests store the raw `text` and `pred_text`, and normalization is applied at scoring time.
+
+```bash
+# dry run over every row of every benchmark file
+python scripts/rescore_all.py
+
+# some models / benchmarks only, keeping the updated CSVs locally for inspection
+python scripts/rescore_all.py --models k2-fsa/OmniVoice openbmb/VoxCPM2 --targets cv3 \\
+    --out_dir /tmp/rescored
+
+# re-use results already synced locally, and open the PR
+python scripts/rescore_all.py --skip_sync --open_pr
+```
 
 
 ## Citation 
