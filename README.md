@@ -103,6 +103,11 @@ facebook/seamless-m4t-v2-large: RTFx = 21.19
 
 Each model family has its own folder (e.g. [kokoro/](kokoro/), [voxcpm2/](voxcpm2/), [transformers/](transformers/)) with a `submit_jobs.sh` that is run **locally** and submits HF Jobs to HF servers. The orchestration shared by all backends lives in [scripts/tts_jobs_common.sh](scripts/tts_jobs_common.sh).
 
+The [Fish Audio Drama 3 backend](fishaudio-drama-3/) uses pinned SGLang Omni for
+default-voice generation, per-sample voice cloning and streaming TTFA. Its launcher
+previews bounded generation jobs; ASR/SIM and result submission are separate steps
+documented in the backend README.
+
 For each (model, dataset split) pair, the pipeline runs three sequential HF Jobs (two if the model is not voice cloning), followed by scoring on your machine. The splits of a model run in parallel; models run one after another.
 
 ```mermaid

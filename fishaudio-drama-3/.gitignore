@@ -1,0 +1,4 @@
+/results/
+/job_logs/
+/submission-*/
+/.venv/
