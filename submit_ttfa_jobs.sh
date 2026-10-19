@@ -111,7 +111,7 @@ TTFA_TARGETS=(
     "fishaudio-s2-pro|fishaudio-s2-pro|bezzam/evals-fish|fishaudio/s2-pro|"
     # GPU-only Drama 3: reuse the backend's pinned OCI bootstrap/server payloads.
     # Space is empty because submit_one selects the immutable image, not a Space.
-    "fishaudio-drama-3|fishaudio-drama-3||fishaudio/drama-3||sglang"
+    "fishaudio-drama-3|fishaudio-drama-3|${DRAMA_SPACE:-bezzam/evals-drama3}|fishaudio/drama-3||sglang"
     # S2-Pro under SGLang-Omni, its streaming engine (the in-process fish-speech backend above
     # yields once per utterance, so it only gives a whole-utterance clock). Reuses higgs/run_eval.py
     # (a plain client of sgl-omni's /v1/audio/speech), the higgs) case below and the higgs image.
@@ -246,20 +246,16 @@ submit_one() {
             # Library mode defines payload functions only. Submit exactly one shared
             # probe Job; do not call the backend launcher or start another client.
             source "${REPO_ROOT}/fishaudio-drama-3/submit_jobs.sh"
-            image="lmsysorg/sglang@sha256:2dbe4c7f53230b09aaa8fa41891c13c51d9d2e253f486a70822aaf08783fff75"
             local runtime_inject client_args
             local -a probe_args=(--model_id "${model_id}" --dataset_path "${TTFA_DATASET_PATH}"
                 --dataset "${TTFA_DATASET}" --split "${TTFA_SPLIT}"
                 --max_eval_samples -1 --batch_size 1 --ttfa_probe "${TTFA_SAMPLES}"
                 --device "${TTFA_DEVICE}" "${clone_flag}")
             printf -v client_args '%q ' "${probe_args[@]}"
-            runtime_inject="$(drama_bootstrap_script | inject_script /app/fishaudio-drama-3/bootstrap_runtime.sh) "
-            runtime_inject+="$(drama_job_script | inject_script /app/fishaudio-drama-3/run_job.sh) "
+            runtime_inject="$(drama_job_script | inject_script /app/fishaudio-drama-3/run_job.sh) "
             hf jobs run \
                 --flavor "${FLAVOR}" --timeout "${TTFA_TIMEOUT:-8h}" --secrets HF_TOKEN ${NAMESPACE_ARG} \
-                --env "JOB_FLAVOR=${FLAVOR}" --env PYTHON_BIN=/opt/sglang/bin/python3 \
-                --env SGLANG_OMNI_AUTO_CLONE=0 --env "DRAMA_RUNTIME_IMAGE=${image}" \
-                --env LD_LIBRARY_PATH=/opt/sglang/lib/python3.12/site-packages/nvidia/nccl/lib:/usr/local/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64 \
+                --env "JOB_FLAVOR=${FLAVOR}" \
                 --volume "hf://buckets/${RESULTS_BUCKET}:/results" "${image}" \
                 bash -c "
                     set -e
@@ -267,7 +263,7 @@ submit_one() {
                     ${TTFA_INJECT}
                     ${runtime_inject}
                     cd /app/fishaudio-drama-3
-                    bash bootstrap_runtime.sh && bash run_job.sh ${client_args}
+                    bash run_job.sh ${client_args}
                 "
             return $?
             ;;

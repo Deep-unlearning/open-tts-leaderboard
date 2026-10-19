@@ -1,9 +1,9 @@
 """Fish Audio Drama 3 generation and streaming TTFA via pinned local SGLang Omni.
 
-Preview: bash fishaudio-drama-3/submit_jobs.sh
-The launcher supports an explicit immutable image/bootstrap or a compatible public
-Space image; --help lists bounded generation options. ASR/SIM use the shared
-helpers, and scripts/open_results_pr.py handles result submission separately.
+Run: bash fishaudio-drama-3/submit_jobs.sh
+The launcher uses the bezzam/evals-drama3 Space image (pinned runtime baked in), or with
+TTS_SPACE= bootstraps that runtime on the approved SGLang base image. It runs the shared transcribe/SIM/scoring stages;
+scripts/open_results_pr.py handles result submission separately.
 """
 
 import argparse
@@ -371,14 +371,6 @@ def normalizer_identity():
     digest = hashlib.sha256()
     for path in files:
         digest.update(path.name.encode() + b"\0" + path.read_bytes())
-    # HF jobs inject the backend without the Git checkout or normalizer files.
-    # Preserve the launcher's source identity without claiming to run normalization.
-    source_identity = os.environ.get("OPEN_TTS_SOURCE_IDENTITY")
-    if not files and source_identity:
-        identity = json.loads(source_identity)
-        identity["note"] = "Source checkout provenance only; generation does not run normalization."
-        return identity
-
     def git(*args):
         try:
             return subprocess.check_output(
