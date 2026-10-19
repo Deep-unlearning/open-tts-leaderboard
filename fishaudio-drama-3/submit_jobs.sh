@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Preview bounded generation jobs; --execute submits them serially without scoring.
-set -euo pipefail
 
 usage() {
     cat <<'EOF'
 Usage: bash fishaudio-drama-3/submit_jobs.sh [--execute]
+
+Shared TTFA entry point (A100 GPU, batch 1, whole CV3 English split):
+  bash submit_ttfa_jobs.sh fishaudio-drama-3
+Use TTFA_SAMPLES=8 TTFA_TIMEOUT=30m for a bounded smoke probe. CPU is unsupported.
 
 Default: preview one Seed-TTS en generation job, 8 rows, H200, 30-minute timeout.
 Execution requires TTS_SPACE=owner/public-space or an immutable TTS_IMAGE, plus RESULTS_BUCKET.
@@ -407,6 +410,13 @@ inject_script() {
     payload="$(gzip -9c | base64 -w0)"
     printf "mkdir -p /app/fishaudio-drama-3 && echo '%s' | base64 -d | gzip -dc > %s &&" "$payload" "$target"
 }
+
+# The shared TTFA launcher reuses these payloads without running this launcher or
+# changing its caller's shell options. Runtime scripts retain their own exit traps.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+fi
+set -euo pipefail
 
 EXECUTE=false
 for option in "$@"; do
