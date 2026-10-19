@@ -81,7 +81,7 @@ from pathlib import Path
 import sys
 
 parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-parser.add_argument("--dataset_path", default="bezzam/seed_tts_eval")
+parser.add_argument("--dataset_path", default="hf-audio/seed_tts_eval")
 parser.add_argument("--dataset", default="tts")
 parser.add_argument("--dataset_local_root")
 parser.add_argument("--split", default="en")
