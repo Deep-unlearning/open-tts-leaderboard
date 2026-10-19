@@ -87,8 +87,8 @@ bash transformers/submit_jobs.sh "facebook/seamless-m4t-v2-large 32 "
 ********************************************************************************
 Results per dataset:
 ********************************************************************************
-facebook/seamless-m4t-v2-large | bezzam-cv3_eval_zero_shot_en: WER = 4.55 %, RTFx = 23.01
-facebook/seamless-m4t-v2-large | bezzam-seed_tts_eval_tts_en: WER = 0.00 %, RTFx = 19.46
+facebook/seamless-m4t-v2-large | hf-audio-cv3_eval_zero_shot_en: WER = 4.55 %, RTFx = 23.01
+facebook/seamless-m4t-v2-large | hf-audio-seed_tts_eval_tts_en: WER = 0.00 %, RTFx = 19.46
 
 ********************************************************************************
 Composite Results:
@@ -153,7 +153,7 @@ Useful environment variables (see [scripts/tts_jobs_common.sh](scripts/tts_jobs_
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DATASET_NAMESPACE` | `bezzam` | Namespace holding your private `seed_tts_eval` / `cv3_eval` copies |
+| `DATASET_NAMESPACE` | `hf-audio` | Namespace holding your private `seed_tts_eval` / `cv3_eval` copies |
 | `RESULTS_BUCKET` | `hf-audio/tts_leaderboard_h200` | Bucket the jobs write to |
 | `MAX_EVAL_SAMPLES` | `-1` (all) | Cap samples per split, e.g. `8` for a smoke test |
 | `ONLY_LANGS` | (all) | Only run the configured splits for these languages, e.g. `"en zh"` |
@@ -265,6 +265,25 @@ TTFA_DEVICE=cpu bash submit_ttfa_jobs.sh kokoro
 To add a model, implement `--ttfa_probe` in its `run_eval.py` (see [scripts/ttfa_probe.py](scripts/ttfa_probe.py)) and add it to `TTFA_TARGETS` in [submit_ttfa_jobs.sh](submit_ttfa_jobs.sh).
 
 The leaderboard reports the p50 and p95 TTFA and the batch-1 RTFx (`python scripts/open_results_pr.py --model_id <model> --targets streaming`). **Batch-1 RTFx is not the leaderboard RTFx**, which is measured at each backend's real batch size.
+
+
+## Miscellaneous
+
+#### Normalizer changes
+
+After a normalization change, existing JSONL manifests can be rescored without rerunning generation or ASR: manifests store the raw `text` and `pred_text`, and normalization is applied at scoring time.
+
+```bash
+# dry run over every row of every benchmark file
+python scripts/rescore_all.py
+
+# some models / benchmarks only, keeping the updated CSVs locally for inspection
+python scripts/rescore_all.py --models k2-fsa/OmniVoice openbmb/VoxCPM2 --targets cv3 \\
+    --out_dir /tmp/rescored
+
+# re-use results already synced locally, and open the PR
+python scripts/rescore_all.py --skip_sync --open_pr
+```
 
 
 ## Citation 
