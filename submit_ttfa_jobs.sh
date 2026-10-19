@@ -109,9 +109,8 @@ TTFA_TARGETS=(
     "chatterbox|chatterbox|bezzam/evals-chatterbox|ResembleAI/chatterbox|--language=${TTFA_LANG}"
     "cosyvoice3|cosyvoice3|bezzam/evals-cosy|FunAudioLLM/Fun-CosyVoice3-0.5B-2512|--llm_checkpoint=llm.rl.pt"
     "fishaudio-s2-pro|fishaudio-s2-pro|bezzam/evals-fish|fishaudio/s2-pro|"
-    # GPU-only Drama 3: reuse the backend's pinned OCI bootstrap/server payloads.
-    # Space is empty because submit_one selects the immutable image, not a Space.
-    "fishaudio-drama-3|fishaudio-drama-3|${DRAMA_SPACE:-bezzam/evals-drama3}|fishaudio/drama-3||sglang"
+    # Drama 3 under SGLang-Omni (GPU only): submit_one starts the server on the pinned snapshot.
+    "fishaudio-drama-3|fishaudio-drama-3|${DRAMA_SPACE:-bezzam/evals-drama3}|fishaudio/drama-3|--host=127.0.0.1 --port=${SGLANG_PORT}|sglang"
     # S2-Pro under SGLang-Omni, its streaming engine (the in-process fish-speech backend above
     # yields once per utterance, so it only gives a whole-utterance clock). Reuses higgs/run_eval.py
     # (a plain client of sgl-omni's /v1/audio/speech), the higgs) case below and the higgs image.
@@ -235,37 +234,18 @@ submit_one() {
 
     case "${backend}" in
         fishaudio-drama-3)
-            case "${TTFA_DEVICE}:${FLAVOR}" in
-                cuda:0:a100-large|cuda:0:h200) ;;
-                *) echo "ERROR: Fish Drama 3 TTFA requires CUDA device 0 on a100-large or h200; CPU is unsupported." >&2; return 1 ;;
-            esac
-            [[ "${model_id}" == fishaudio/drama-3 && "${TTFA_SAMPLES}" =~ ^-?[1-9][0-9]*$ ]] || {
-                echo "ERROR: Fish TTFA requires fishaudio/drama-3 and a nonzero integer TTFA_SAMPLES." >&2
-                return 1
-            }
-            # Library mode defines payload functions only. Submit exactly one shared
-            # probe Job; do not call the backend launcher or start another client.
-            source "${REPO_ROOT}/fishaudio-drama-3/submit_jobs.sh"
-            local runtime_inject client_args
-            local -a probe_args=(--model_id "${model_id}" --dataset_path "${TTFA_DATASET_PATH}"
-                --dataset "${TTFA_DATASET}" --split "${TTFA_SPLIT}"
-                --max_eval_samples -1 --batch_size 1 --ttfa_probe "${TTFA_SAMPLES}"
-                --device "${TTFA_DEVICE}" "${clone_flag}")
-            printf -v client_args '%q ' "${probe_args[@]}"
-            runtime_inject="$(drama_job_script | inject_script /app/fishaudio-drama-3/run_job.sh) "
-            hf jobs run \
-                --flavor "${FLAVOR}" --timeout "${TTFA_TIMEOUT:-8h}" --secrets HF_TOKEN ${NAMESPACE_ARG} \
-                --env "JOB_FLAVOR=${FLAVOR}" \
-                --volume "hf://buckets/${RESULTS_BUCKET}:/results" "${image}" \
-                bash -c "
-                    set -e
-                    ${inject}
-                    ${TTFA_INJECT}
-                    ${runtime_inject}
-                    cd /app/fishaudio-drama-3
-                    bash run_job.sh ${client_args}
-                "
-            return $?
+            # Same server start as fishaudio-drama-3/submit_jobs.sh's generate_stage: serve the
+            # pinned snapshot (sglang_omni serve has no --revision). The probe writes voice-clone
+            # references into a temp dir under results/, the server's allowed media root.
+            preamble="${preamble}
+            set -e
+            mkdir -p /app/fishaudio-drama-3/results
+            SNAPSHOT=\$(python -c 'from huggingface_hub import snapshot_download; print(snapshot_download(\"${model_id}\", revision=\"e0a9218aa48888270f06ef1ed9ea67622c0e17d2\"))')
+            python -m sglang_omni.cli serve --model-path \$SNAPSHOT --model-name ${model_id} --host 127.0.0.1 --port ${SGLANG_PORT} \
+                --allowed-local-media-path /app/fishaudio-drama-3/results > /app/fishaudio-drama-3/results/server.log 2>&1 &
+            SERVER_PID=\$!
+            trap 'kill \$SERVER_PID 2>/dev/null || true' EXIT"
+            postamble="|| { echo '--- sglang_omni serve log (full) ---'; cat /app/fishaudio-drama-3/results/server.log; exit 1; }"
             ;;
         higgs)
             # S2-Pro checkpoints carry no `architectures`, so sgl-omni cannot infer the pipeline

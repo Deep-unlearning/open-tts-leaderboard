@@ -1,9 +1,9 @@
 """Fish Audio Drama 3 generation and streaming TTFA via pinned local SGLang Omni.
 
 Run: bash fishaudio-drama-3/submit_jobs.sh
-The launcher uses the bezzam/evals-drama3 Space image (pinned runtime baked in), or with
-TTS_SPACE= bootstraps that runtime on the approved SGLang base image. It runs the shared transcribe/SIM/scoring stages;
-scripts/open_results_pr.py handles result submission separately.
+The launcher serves the pinned model on the bezzam/evals-drama3 Space image (pinned SGLang Omni
+baked in) and runs the shared transcribe/SIM/scoring stages; scripts/open_results_pr.py handles
+result submission separately.
 """
 
 import argparse
