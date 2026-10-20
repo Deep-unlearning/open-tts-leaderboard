@@ -194,6 +194,13 @@ NO_CLONE_FLAG="inflect-nano inflect-v2 kokoro lfm2-audio magpie-tts paradee phot
 submit_one() {
     local backend="$1" space="$2" model_id="$3" extra="$4" engine="$5"
     local model_safe="${model_id//\//-}"
+    # Drama 3's FP8 experts need native FP8 (sm_89+), so it defaults to h200 instead of the shared
+    # A100 default. An explicit TTFA_FLAVOR is kept (and rejected below if it is not h200).
+    local FLAVOR="${FLAVOR}"
+    if [[ "${backend}" == fishaudio-drama-3 && -z "${TTFA_FLAVOR:-}" && "${TTFA_DEVICE}" != cpu ]]; then
+        FLAVOR=h200
+        echo "NOTE: ${model_id} runs on h200 (FP8 experts are unsupported on ${TTFA_GPU_FLAVOR})."
+    fi
     # Sidecar suffix: engine first (when the target names one), then always the flavor.
     local sidecar_suffix="${engine:+__${engine}}__${FLAVOR}"
     local image="hf.co/spaces/${space}"
@@ -234,6 +241,11 @@ submit_one() {
 
     case "${backend}" in
         fishaudio-drama-3)
+            # Explicit TTFA_FLAVOR / TTFA_DEVICE=cpu: the FP8 experts need sm_89+ (Triton rejects fp8e4nv on A100).
+            if [[ "${FLAVOR}" != h200 ]]; then
+                echo "ERROR: fishaudio/drama-3 (FP8 experts) does not run on ${FLAVOR}; use TTFA_FLAVOR=h200." >&2
+                return 1
+            fi
             # Same server start as fishaudio-drama-3/submit_jobs.sh's generate_stage: serve the
             # pinned snapshot (sglang_omni serve has no --revision). The probe writes voice-clone
             # references into a temp dir under results/, the server's allowed media root.
@@ -332,6 +344,8 @@ for target in "${TTFA_TARGETS[@]}"; do
     fi
     log="${LOG_DIR}/${label}_${model_id//\//-}.log"
     echo "Submitting TTFA probe: ${model_id}  (label=${label}, backend=${backend}, log: ${log})"
+    [[ "${backend}" == fishaudio-drama-3 && -z "${TTFA_FLAVOR:-}" && "${TTFA_DEVICE}" != cpu ]] &&
+        echo "  NOTE: ${model_id} runs on h200, not ${FLAVOR}: its FP8 experts need sm_89+."
     ( submit_one "${backend}" "${space}" "${model_id}" "${extra}" "${engine}" ) > "${log}" 2>&1 &
     # Exact log path: two targets can share a model id (one per engine).
     PIDS+=("$!"); TAGS+=("${label}"); MIDS+=("${model_id}"); LOGS+=("${log}")
