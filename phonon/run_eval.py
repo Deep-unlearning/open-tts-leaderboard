@@ -557,7 +557,7 @@ def main(args):
             audio, elapsed = synth_one(text)  # raw text, including brackets/whitespace
             target = Path(paths.model_dir) / relative
             duration = write_audio(target, audio, tts.sample_rate)
-            entry = manifest_entry(relative, duration, None, text)
+            entry = manifest_entry(relative, duration, elapsed, text)
             entry.update(device="cpu", cpu_generation_time_s=elapsed, official_h200_rtfx=False,
                          timing_scope="generation_complete", audio_sha256=file_hash(target))
             write_entry(manifest, entry)
