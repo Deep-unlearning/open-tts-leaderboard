@@ -40,8 +40,14 @@ generate_stage() {
     "${job[@]}" --volume "hf://buckets/${RESULTS_BUCKET}:/results" "$TTS_IMAGE" bash -c "$command"
 }
 
-DATASET_CONFIGS=("tts en en" "zero_shot en en ${CV3_EVAL_PATH}")
-MODEL_CONFIGS=("gradium/phonon-31m-en" "gradium/phonon-40m-en")
+DATASET_CONFIGS=(
+    "tts en en"
+    "zero_shot en en ${CV3_EVAL_PATH}"
+)
+MODEL_CONFIGS=(
+    "gradium/phonon-31m-en"
+    "gradium/phonon-40m-en"
+)
 [[ $# -eq 0 ]] || MODEL_CONFIGS=("$@")
 
 fail() { echo "Phonon: $*" >&2; exit 1; }
