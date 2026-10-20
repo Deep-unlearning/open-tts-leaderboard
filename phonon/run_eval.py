@@ -1,7 +1,7 @@
 """Fixed-preset Phonon stage 1, using the released ptts 0.4.0 API.
 
 Follows paradee/run_eval.py's serial generation and common manifest conventions.
-Supply a local checkpoint, preset and private output root; no weights are downloaded.
+Downloads a pinned public Q8 checkpoint, or accepts an existing local checkpoint.
 CPU completion timing is diagnostic, not official H200 RTFx. No cloning/SIM.
 The separate TTFA path measures 500 CV3 English requests on cpu-upgrade,
 using the blocking API by default or an explicitly selected streaming API.
@@ -32,6 +32,12 @@ from run_eval_utils import (
     wav_rel_path,
     write_entry,
 )
+
+
+MODEL_REVISIONS = {
+    "gradium/phonon-31m-en": "52433c46975bfa13144c56204c9f4ee1c5b148aa",
+    "gradium/phonon-40m-en": "9b95393286eaeeebf1330b2ae90a14a2074c415d",
+}
 
 
 def file_hash(path):
@@ -384,8 +390,6 @@ def main(args):
         raise ValueError("Invalid thread, warmup or seed setting.")
     if not all(math.isfinite(v) and v >= 0 for v in (args.temperature, args.eos_threshold)):
         raise ValueError("Temperature and EOS threshold must be finite and nonnegative.")
-    if not re.fullmatch(r"[0-9a-f]{40}", args.dataset_revision):
-        raise ValueError("Supply the full immutable dataset revision.")
     for value in (args.model_id, args.dataset_path):
         if (not value or not re.fullmatch(r"[\w.-]+/[\w.-]+", value)
                 or any(part in (".", "..") for part in value.split("/"))):
@@ -395,6 +399,23 @@ def main(args):
     if args.dataset not in ("tts", "zero_shot") or not re.fullmatch(r"[\w-]+", args.voice):
         raise ValueError("Select a standard dataset configuration and an explicit preset name.")
 
+    if not args.dataset_revision:
+        from huggingface_hub import HfApi
+
+        args.dataset_revision = HfApi().dataset_info(args.dataset_path).sha
+    if not re.fullmatch(r"[0-9a-f]{40}", args.dataset_revision):
+        raise ValueError("Supply the full immutable dataset revision.")
+    if not args.checkpoint_path:
+        from huggingface_hub import snapshot_download
+
+        revision = getattr(args, "model_revision", None) or MODEL_REVISIONS.get(args.model_id)
+        if not revision or not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise ValueError("Supply an immutable model revision for an unlisted checkpoint.")
+        args.checkpoint_path = snapshot_download(
+            args.model_id, revision=revision,
+            allow_patterns=["config.json", "tokenizer.json", "model.q8.gguf",
+                            "default-voice.safetensors", "voices/*.safetensors"],
+        )
     checkpoint = Path(args.checkpoint_path).expanduser().resolve(strict=True)
     if not checkpoint.is_dir():
         raise ValueError("Checkpoint must be an existing local directory.")
@@ -536,8 +557,8 @@ def main(args):
             audio, elapsed = synth_one(text)  # raw text, including brackets/whitespace
             target = Path(paths.model_dir) / relative
             duration = write_audio(target, audio, tts.sample_rate)
-            entry = manifest_entry(relative, duration, elapsed, text)
-            entry.update(device="cpu", official_h200_rtfx=False,
+            entry = manifest_entry(relative, duration, None, text)
+            entry.update(device="cpu", cpu_generation_time_s=elapsed, official_h200_rtfx=False,
                          timing_scope="generation_complete", audio_sha256=file_hash(target))
             write_entry(manifest, entry)
             manifest.flush()
@@ -549,11 +570,12 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model_id", required=True, help="Private output label, not a download source.")
-    parser.add_argument("--checkpoint_path", required=True, help="Existing local q8 checkpoint directory.")
+    parser.add_argument("--model_id", required=True, help="Public model repository, also used as the output label.")
+    parser.add_argument("--model_revision", help="Immutable model commit; defaults to the evaluated release.")
+    parser.add_argument("--checkpoint_path", help="Optional existing local q8 checkpoint directory.")
     parser.add_argument("--voice", default="default", help="Bundled default voice, or a local preset name.")
     parser.add_argument("--output_root", required=True, help="Private directory outside Git; results/ is created within it.")
-    parser.add_argument("--dataset_revision", required=True, help="Immutable 40-character Hub dataset revision.")
+    parser.add_argument("--dataset_revision", help="Immutable dataset commit; resolves current Hub revision if omitted.")
     parser.add_argument("--temperature", type=float, default=0.3)
     parser.add_argument("--eos_threshold", type=float, default=4.0)
     parser.add_argument("--conditions", type=json.loads, default={"num_speakers": "1", "duration_delta": 0.0})

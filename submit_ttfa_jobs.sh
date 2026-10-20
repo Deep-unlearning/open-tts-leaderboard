@@ -22,7 +22,6 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/tts_jobs_common.sh
 # The median converges quickly; the full split is what gives a trustworthy p90/p95 tail.
 TTFA_SAMPLES="${TTFA_SAMPLES:--1}"
 # One dataset for every model, so the numbers are comparable: CV3-Eval English.
-PHONON_EXPLICIT_DATASET_PATH="${TTFA_DATASET_PATH:-}"
 TTFA_DATASET_PATH="${TTFA_DATASET_PATH:-${CV3_EVAL_PATH}}"   # CV3_EVAL_PATH: set by tts_jobs_common.sh
 TTFA_DATASET="${TTFA_DATASET:-zero_shot}"
 TTFA_SPLIT="${TTFA_SPLIT:-en}"
@@ -83,136 +82,24 @@ esac
 # backend's own submit_jobs.sh passes cuda:0, so match that.
 [[ "${TTFA_DEVICE}" == "cuda" ]] && TTFA_DEVICE="cuda:0"
 
-# Local checkpoint runs require an exact selector; configuring env alone never
-# adds Phonon to the default all-targets run. Validate before any target submits.
+# Phonon is CPU-only and opt-in; keep it out of the default GPU target list.
 PHONON_SELECTED=false
 for selected in "$@"; do
-    if [[ "$selected" == phonon || ( -n "${PHONON_MODEL_ID:-}" && "$selected" == "$PHONON_MODEL_ID" ) ]]; then
-        PHONON_SELECTED=true
-    fi
+    case "$selected" in
+        phonon|phonon-31m-en|phonon-40m-en|gradium/phonon-31m-en|gradium/phonon-40m-en) PHONON_SELECTED=true ;;
+    esac
 done
-PHONON_ATTEMPT_FLAGS=()
+PHONON_TTFA_MODE="${PHONON_TTFA_MODE:-streaming}"
 if ${PHONON_SELECTED}; then
-    if [[ "$TTFA_DEVICE:$FLAVOR:$TTFA_DATASET:$TTFA_SPLIT:$TTFA_LANG:$VOICE_CLONE" != cpu:cpu-upgrade:zero_shot:en:en:false \
-          || ( "$TTFA_SAMPLES" != -1 && "$TTFA_SAMPLES" != 500 ) ]]; then
-        echo "Phonon requires CPU/cpu-upgrade, all 500 CV3 English samples, and a fixed preset." >&2
-        exit 1
-    fi
-    for name in PHONON_SPACE PHONON_MODEL_ID PHONON_VOICE PHONON_TTFA_MODE PHONON_EXPLICIT_DATASET_PATH \
-                TTFA_DATASET_REVISION PHONON_CHECKPOINT_VOLUME PHONON_RESULTS_BUCKET \
-                PHONON_RESULTS_PREFIX PHONON_ATTEMPT_DIR; do
-        if [[ -z "${!name:-}" ]]; then
-            echo "Phonon requires explicit ${name}." >&2
-            exit 1
-        fi
+    for value in "$TTFA_DATASET_PATH" "${PHONON_SPACE:-Steveeeeeeen/evals-phonon-040}" "$RESULTS_BUCKET"; do
+        [[ "$value" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || exit 1
     done
-    if [[ "$PHONON_TTFA_MODE" != blocking && "$PHONON_TTFA_MODE" != streaming ]]; then
-        echo "Select explicit PHONON_TTFA_MODE=blocking or streaming." >&2
-        exit 1
-    fi
-    PHONON_TTFA_TIMEOUT="${PHONON_TTFA_TIMEOUT:-1h}"
-    PHONON_PYTHON="${PHONON_PYTHON:-python3}"
-    # SDK calls below only read metadata. The local exclusive record is retained
-    # after every outcome; a lost client connection never permits another POST.
-    if ! PHONON_ATTEMPT_RECORD=$("$PHONON_PYTHON" - "$PHONON_SPACE" "$PHONON_MODEL_ID" "$PHONON_VOICE" \
-        "$TTFA_DATASET_PATH" "$TTFA_DATASET_REVISION" "$PHONON_CHECKPOINT_VOLUME" \
-        "$PHONON_RESULTS_BUCKET" "$PHONON_RESULTS_PREFIX" "$PHONON_ATTEMPT_DIR" \
-        "$PHONON_TTFA_TIMEOUT" "${TTFA_CPU_THREADS:-}" "${PHONON_TTFA_TEXT_SHA256:-}" "$REPO_ROOT" "$ORG_NAME" "$PHONON_TTFA_MODE" <<'PY'
-import datetime, hashlib, json, os, pathlib, re, sys
-
-try:
-    (space, model, voice, dataset, revision, volume, bucket, prefix, attempts,
-     timeout, threads, text_hash, repo, namespace, mode) = sys.argv[1:]
-    label = r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"
-    def canonical(value):
-        return bool(value) and not value.startswith("/") and ":" not in value and "\\" not in value and all(
-            part not in ("", ".", "..") for part in value.split("/")) and all(
-            ord(char) >= 32 and ord(char) != 127 for char in value)
-    if any(not re.fullmatch(label, value) or not canonical(value) for value in (space, model, dataset, bucket)):
-        raise ValueError("Explicit namespace/name identifiers are required.")
-    if not re.fullmatch(r"[\w-]+", voice) or not re.fullmatch(r"[0-9a-f]{40}", revision):
-        raise ValueError("An explicit preset and full dataset commit are required.")
-    if not canonical(prefix) or bucket == "hf-audio/tts_leaderboard_h200":
-        raise ValueError("Use a dedicated private results bucket and relative prefix.")
-    match = re.fullmatch(r"hf://buckets/(.+):/checkpoint:ro", volume)
-    if not match or not canonical(match[1]):
-        raise ValueError("Checkpoint volume must mount a bucket at /checkpoint:ro.")
-    source = match[1].split("/")
-    if len(source) < 2 or not re.fullmatch(label, "/".join(source[:2])):
-        raise ValueError("Checkpoint volume must identify a bucket.")
-    input_bucket, input_prefix = "/".join(source[:2]), "/".join(source[2:])
-    if input_bucket == bucket and (not input_prefix or prefix == input_prefix or
-            prefix.startswith(input_prefix + "/") or input_prefix.startswith(prefix + "/")):
-        raise ValueError("Checkpoint and results prefixes must not overlap.")
-    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)([smh]?)", timeout)
-    if not match or not 0 < float(match[1]) * {"":1,"s":1,"m":60,"h":3600}[match[2]] <= 3600:
-        raise ValueError("Phonon timeout must be positive and at most one hour.")
-    if threads and (not re.fullmatch(r"[1-9][0-9]*", threads) or int(threads) > 8):
-        raise ValueError("CPU-upgrade requires one to eight threads.")
-    if text_hash and not re.fullmatch(r"[0-9a-f]{64}", text_hash):
-        raise ValueError("Expected text inventory must be a full SHA256.")
-    if namespace and not re.fullmatch(r"[A-Za-z0-9_.-]+", namespace):
-        raise ValueError("Invalid job namespace.")
-    root = pathlib.Path(attempts).expanduser().resolve()
-    if any((parent / ".git").exists() for parent in (root, *root.parents)):
-        raise ValueError("Keep the durable attempt directory outside Git.")
-    if root.exists() and (not root.is_dir() or root.stat().st_mode & 0o077):
-        raise ValueError("Attempt directory must have mode 0700.")
-    model_safe, dataset_safe = model.replace("/", "-"), dataset.replace("/", "-")
-    engine = "__ptts-stream" if mode == "streaming" else ""
-    filename = f"TTFA_MODEL_{model_safe}_DATASET_{dataset_safe}_zero_shot_en{engine}__cpu-upgrade.json"
-    export = f"{prefix}/{model_safe}/{filename}"
-    identity = hashlib.sha256(json.dumps([bucket, export], separators=(",", ":")).encode()).hexdigest()
-    marker = root / (identity + ".json")
-    if marker.exists() or marker.is_symlink():
-        raise FileExistsError("A submission attempt already exists; inspect it instead of resubmitting.")
-    from huggingface_hub import HfApi
-    api = HfApi()
-    info = api.space_info(space)
-    if info.sdk != "docker":
-        raise ValueError("A prebuilt Docker Space is required.")
-    if any(api.bucket_info(value).private is not True for value in dict.fromkeys((input_bucket, bucket))):
-        raise ValueError("Checkpoint and result buckets must both be private.")
-    if list(api.get_bucket_paths_info(bucket, [export])):
-        raise FileExistsError("The exact TTFA export already exists; no new attempt is needed.")
-    record = {
-        "state": "reserved_no_automatic_resubmission", "created_at": datetime.datetime.now(datetime.UTC).isoformat(),
-        "space": space, "space_revision": getattr(info, "sha", None), "model_id": model, "voice": voice,
-        "checkpoint_volume": volume, "results_bucket": bucket, "export_path": export,
-        "dataset_path": dataset, "dataset_revision": revision, "text_sha256": text_hash or None,
-        "flavor": "cpu-upgrade", "ttfa_mode": mode, "threads_override": threads or None, "timeout": timeout,
-        "source_sha256": {name: hashlib.sha256((pathlib.Path(repo) / name).read_bytes()).hexdigest()
-                          for name in ("submit_ttfa_jobs.sh", "phonon/run_eval.py", "scripts/run_eval_utils.py", "scripts/ttfa_probe.py")},
+    [[ "$TTFA_DEVICE:$FLAVOR:$TTFA_DATASET:$TTFA_SPLIT:$TTFA_LANG:$VOICE_CLONE" == cpu:cpu-upgrade:zero_shot:en:en:false \
+        && ( "$TTFA_SAMPLES" == -1 || "$TTFA_SAMPLES" == 500 ) ]] || {
+        echo "Phonon requires CPU/cpu-upgrade, all 500 CV3 English samples, and no voice cloning." >&2; exit 1;
     }
-    os.umask(0o077)
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if root.stat().st_mode & 0o077:
-        raise ValueError("Attempt directory must have mode 0700.")
-    with marker.open("x", encoding="utf-8") as target:
-        json.dump(record, target, indent=2, sort_keys=True)
-        target.flush()
-        os.fsync(target.fileno())
-    print(marker)
-except Exception as error:
-    # SDK failures can contain credentials or private URLs; never print their text.
-    print(f"Phonon preflight failed ({type(error).__name__}); inspect configuration and private attempt records.", file=sys.stderr)
-    sys.exit(1)
-PY
-    ); then
-        exit 1
-    fi
-    # Older installed CLIs lack --attempts. In either case this script makes one
-    # invocation and retains its marker even when submission outcome is uncertain.
-    if ! _phonon_help=$(hf jobs run --help 2>&1); then
-        echo "Cannot inspect the installed HF Jobs CLI; attempt record retained." >&2
-        exit 1
-    fi
-    if [[ "$_phonon_help" == *--attempts* ]]; then
-        PHONON_ATTEMPT_FLAGS=(--attempts 1)
-    fi
-    umask 077
-    PHONON_LOG_DIR="$(dirname "$PHONON_ATTEMPT_RECORD")/logs"
-    mkdir -p "$PHONON_LOG_DIR"
+    [[ "$PHONON_TTFA_MODE" == blocking || "$PHONON_TTFA_MODE" == streaming ]] || exit 1
+    [[ "${TTFA_CPU_THREADS:-1}" =~ ^[1-8]$ ]] || exit 1
 fi
 
 LOG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ttfa_job_logs"
@@ -319,84 +206,52 @@ TTFA_TARGETS=(
     "higgs|higgs|bezzam/evals-higgs|bosonai/higgs-tts-3-4b|--host=127.0.0.1 --port=${SGLANG_PORT}"
 )
 if ${PHONON_SELECTED}; then
-    TTFA_TARGETS+=("phonon|phonon|${PHONON_SPACE}|${PHONON_MODEL_ID}||")
+    TTFA_TARGETS+=(
+        "phonon-31m-en|phonon|${PHONON_SPACE:-Steveeeeeeen/evals-phonon-040}|gradium/phonon-31m-en||"
+        "phonon-40m-en|phonon|${PHONON_SPACE:-Steveeeeeeen/evals-phonon-040}|gradium/phonon-40m-en||"
+    )
 fi
 
 # Backends whose run_eval.py has no --voice_clone flag at all; passing one would be an error.
 NO_CLONE_FLAG="inflect-nano inflect-v2 kokoro lfm2-audio magpie-tts paradee phonon photon qwen3tts qwen3tts-fast supertonic vibevoice_realtime voxtral-tts"
 
 submit_phonon() {
-    local model_safe="${PHONON_MODEL_ID//\//-}" dataset_safe="${TTFA_DATASET_PATH//\//-}"
-    local filename inject quoted_args assignments body
-    local engine=""
+    local model_id="$1" space="$2" model_safe="${1//\//-}" dataset_safe="${TTFA_DATASET_PATH//\//-}"
+    local engine="" runner
     [[ "$PHONON_TTFA_MODE" != streaming ]] || engine="__ptts-stream"
-    filename="TTFA_MODEL_${model_safe}_DATASET_${dataset_safe}_zero_shot_en${engine}__cpu-upgrade.json"
-    inject="$(inject_cmd_gz "${REPO_ROOT}/phonon/run_eval.py" /app/phonon/run_eval.py)"
-    local args=(--model_id "$PHONON_MODEL_ID" --checkpoint_path /checkpoint --voice "$PHONON_VOICE"
-        --dataset_path "$TTFA_DATASET_PATH" --dataset_revision "$TTFA_DATASET_REVISION"
+    local filename="TTFA_MODEL_${model_safe}_DATASET_${dataset_safe}_zero_shot_en${engine}__cpu-upgrade.json"
+    local args=(--model_id "$model_id" --dataset_path "$TTFA_DATASET_PATH"
         --dataset zero_shot --split en --device cpu --ttfa_probe 500 --ttfa_flavor cpu-upgrade
-        --ttfa_mode "$PHONON_TTFA_MODE"
-        --max_eval_samples -1 --warmup_steps 0 --temperature 0.3 --seed 4242424242424242 --eos_threshold 4.0
-        --conditions '{"num_speakers":"1","duration_delta":0.0}' --rewrites default)
-    [[ -z "${PHONON_TTFA_TEXT_SHA256:-}" ]] || args+=(--ttfa_text_sha256 "$PHONON_TTFA_TEXT_SHA256")
-    printf -v quoted_args '%q ' "${args[@]}"
-    printf -v assignments '_model_safe=%q\n_filename=%q\n_cpu_override=%q\n' \
-        "$model_safe" "$filename" "${TTFA_CPU_THREADS:-}"
-    body="set -euo pipefail
-umask 077
-${inject}
-${TTFA_INJECT}
-${assignments}
-"
-    body+="$(cat <<'BASH'
-_destination="/phonon-results/${_model_safe}"
-_export="${_destination}/${_filename}"
-if [[ -e "$_export" || -L "$_export" ]]; then
-    echo "TTFA export already exists; refusing model work." >&2
-    exit 1
-fi
-_quota=""
-if [[ -r /sys/fs/cgroup/cpu.max ]]; then
-    read -r _limit _period < /sys/fs/cgroup/cpu.max
-    if [[ "$_limit" =~ ^[1-9][0-9]*$ && "$_period" =~ ^[1-9][0-9]*$ ]]; then
-        _quota=$((_limit / _period))
-        [[ "$_quota" -gt 0 ]] || _quota=1
-    fi
-fi
-_available=$(nproc)
-[[ -z "$_quota" || "$_available" -le "$_quota" ]] || _available=$_quota
-[[ "$_available" -le 8 ]] || _available=8
-_cpuq=${_cpu_override:-$_available}
-[[ "$_cpuq" -ge 1 && "$_cpuq" -le "$_available" ]] || { echo "CPU quota is smaller than requested threads." >&2; exit 1; }
-export OMP_NUM_THREADS="$_cpuq" MKL_NUM_THREADS="$_cpuq" OPENBLAS_NUM_THREADS="$_cpuq"
-_work=$(mktemp -d /tmp/phonon-ttfa.XXXXXX)
-chmod 700 "$_work"
-BASH
-)"
-    body+=$'\n'
-    body+="python /app/phonon/run_eval.py ${quoted_args} --threads \"\${_cpuq}\" --output_root \"\${_work}/quality-unused\" --ttfa_output_root \"\${_work}/ttfa\""
-    body+=$'\n'
-    body+="$(cat <<'BASH'
-_sidecar="${_work}/ttfa/results/${_model_safe}/${_filename}"
-test -f "$_sidecar"
-mkdir -p "$_destination"
-test ! -e "$_export"
-test ! -L "$_export"
-(set -o noclobber; cat "$_sidecar" > "$_export")
-BASH
-)"
-    local command=(hf jobs run --flavor cpu-upgrade --timeout "$PHONON_TTFA_TIMEOUT" --secrets HF_TOKEN)
-    [[ -z "$ORG_NAME" ]] || command+=(--namespace "$ORG_NAME")
-    command+=("${PHONON_ATTEMPT_FLAGS[@]}" --volume "$PHONON_CHECKPOINT_VOLUME"
-        --volume "hf://buckets/${PHONON_RESULTS_BUCKET}/${PHONON_RESULTS_PREFIX}:/phonon-results"
-        "hf.co/spaces/${PHONON_SPACE}" bash -c "$body")
-    "${command[@]}"
+        --ttfa_mode "$PHONON_TTFA_MODE" --max_eval_samples -1 --warmup_steps 0)
+    [[ -z "${TTFA_DATASET_REVISION:-}" ]] || args+=(--dataset_revision "$TTFA_DATASET_REVISION")
+    printf -v runner '%q ' python /app/phonon/run_eval.py "${args[@]}"
+    local command="set -euo pipefail
+        umask 077
+        $(inject_cmd_gz "${REPO_ROOT}/phonon/run_eval.py" /app/phonon/run_eval.py)
+        ${TTFA_INJECT} true || exit 1
+        destination='/results/${model_safe}/${filename}'
+        test ! -e \"\$destination\" || { echo 'TTFA result already exists.' >&2; exit 1; }
+        capacity=\$(nproc)
+        quota=\$(awk '{ if (\$1 == \"max\") print 0; else { n=int(\$1/\$2); print (n>0 ? n : 1) } }' /sys/fs/cgroup/cpu.max 2>/dev/null || echo 0)
+        [[ \"\$quota\" -eq 0 || \"\$quota\" -ge \"\$capacity\" ]] || capacity=\$quota
+        [[ \"\$capacity\" -le 8 ]] || capacity=8
+        threads=${TTFA_CPU_THREADS:-\$capacity}
+        [[ \"\$threads\" -ge 1 && \"\$threads\" -le \"\$capacity\" ]] || exit 1
+        export OMP_NUM_THREADS=\$threads MKL_NUM_THREADS=\$threads OPENBLAS_NUM_THREADS=\$threads
+        work_dir=\$(mktemp -d /tmp/phonon-ttfa.XXXXXXXX)
+        ${runner} --threads \"\$threads\" --output_root \"\$work_dir/quality\" --ttfa_output_root \"\$work_dir/ttfa\"
+        mkdir -p '/results/${model_safe}'
+        (set -o noclobber; cat \"\$work_dir/ttfa/results/${model_safe}/${filename}\" > \"\$destination\")
+    "
+    local -a job=(hf jobs run --flavor cpu-upgrade --timeout 1h --secrets HF_TOKEN)
+    [[ -z "$ORG_NAME" ]] || job+=(--namespace "$ORG_NAME")
+    "${job[@]}" --volume "hf://buckets/${RESULTS_BUCKET}:/results" "hf.co/spaces/${space}" bash -c "$command"
 }
 
 submit_one() {
     local backend="$1" space="$2" model_id="$3" extra="$4" engine="$5"
     if [[ "$backend" == phonon ]]; then
-        submit_phonon
+        submit_phonon "$model_id" "$space"
         return
     fi
     local model_safe="${model_id//\//-}"
@@ -523,7 +378,6 @@ for target in "${TTFA_TARGETS[@]}"; do
         exit 1
     fi
     log="${LOG_DIR}/${label}_${model_id//\//-}.log"
-    [[ "$backend" != phonon ]] || log="${PHONON_LOG_DIR}/${label}_${model_id//\//-}.log"
     echo "Submitting TTFA probe: ${model_id}  (label=${label}, backend=${backend}, log: ${log})"
     ( submit_one "${backend}" "${space}" "${model_id}" "${extra}" "${engine}" ) > "${log}" 2>&1 &
     # Exact log path: two targets can share a model id (one per engine).
