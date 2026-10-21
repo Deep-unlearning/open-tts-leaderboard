@@ -1,14 +1,16 @@
 #!/bin/bash
-# English, fixed voice. Usage: FLAVOR=cpu-upgrade bash phonon/submit_jobs.sh [model_id ...]
+# English, fixed voice. Usage: bash phonon/submit_jobs.sh [model_id ...]
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/tts_jobs_common.sh"
 
-# Dockerfile: https://huggingface.co/spaces/Steveeeeeeen/evals-phonon-040/blob/main/Dockerfile
 TTS_SPACE="${PHONON_SPACE:-Steveeeeeeen/evals-phonon-040}"
 RUN_EVAL_INJECT="$(inject_run_eval)"
-DEFAULT_STAGES="generate transcribe"
+DEFAULT_STAGES="generate transcribe utmos"
 SUPPORTS_VOICE_CLONE=false
 STAGE_RETRIES=0
+# Exception to the shared h200 gen flavor: the Q8 ptts runtime is CPU-only (no GPU path), so an
+# h200 would sit idle. Its RTFx is therefore a CPU number, not directly comparable with the h200 models.
+FLAVOR=cpu-upgrade
 PHONON_THREADS="${PHONON_THREADS:-1}"
 supports_language() { [[ "$1" == en ]]; }
 
@@ -60,10 +62,8 @@ for model in "${MODEL_CONFIGS[@]}"; do
     [[ "$model" == gradium/phonon-31m-en || "$model" == gradium/phonon-40m-en ]] || fail "Select a released English checkpoint."
 done
 case "${STAGES:-$DEFAULT_STAGES}" in
-    generate|"generate transcribe")
-        [[ "$FLAVOR" == cpu-upgrade ]] || fail "The Q8 runtime is CPU-only; set FLAVOR=cpu-upgrade. H200 RTFx is unavailable." ;;
-    transcribe) ;;
-    *) fail "Supported stages: generate, 'generate transcribe', or transcribe." ;;
+    generate|"generate transcribe"|"generate transcribe utmos"|transcribe|utmos|"transcribe utmos") ;;
+    *) fail "Supported stages: generate, 'generate transcribe', 'generate transcribe utmos', transcribe, utmos, or 'transcribe utmos'." ;;
 esac
 
 run_pipeline

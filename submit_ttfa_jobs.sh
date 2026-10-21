@@ -91,15 +91,10 @@ for selected in "$@"; do
 done
 PHONON_TTFA_MODE="${PHONON_TTFA_MODE:-streaming}"
 if ${PHONON_SELECTED}; then
-    for value in "$TTFA_DATASET_PATH" "${PHONON_SPACE:-Steveeeeeeen/evals-phonon-040}" "$RESULTS_BUCKET"; do
-        [[ "$value" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || exit 1
-    done
     [[ "$TTFA_DEVICE:$FLAVOR:$TTFA_DATASET:$TTFA_SPLIT:$TTFA_LANG:$VOICE_CLONE" == cpu:cpu-upgrade:zero_shot:en:en:false \
         && ( "$TTFA_SAMPLES" == -1 || "$TTFA_SAMPLES" == 500 ) ]] || {
         echo "Phonon requires CPU/cpu-upgrade, all 500 CV3 English samples, and no voice cloning." >&2; exit 1;
     }
-    [[ "$PHONON_TTFA_MODE" == blocking || "$PHONON_TTFA_MODE" == streaming ]] || exit 1
-    [[ "${TTFA_CPU_THREADS:-1}" =~ ^[1-8]$ ]] || exit 1
 fi
 
 LOG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ttfa_job_logs"
@@ -217,8 +212,10 @@ fi
 # Backends whose run_eval.py has no --voice_clone flag at all; passing one would be an error.
 NO_CLONE_FLAG="inflect-nano inflect-v2 kokoro lfm2-audio magpie-tts paradee phonon photon qwen3tts qwen3tts-fast supertonic vibevoice_realtime voxtral-tts"
 
+# run_eval.py writes to its own output roots (outside Git, mode 0700) and names the sidecar itself,
+# so Phonon skips the generic run/rename/copy below; `preamble` is submit_one's CPU thread cap.
 submit_phonon() {
-    local model_id="$1" space="$2" model_safe="${1//\//-}" dataset_safe="${TTFA_DATASET_PATH//\//-}"
+    local model_id="$1" space="$2" inject="$3" preamble="$4" model_safe="${1//\//-}" dataset_safe="${TTFA_DATASET_PATH//\//-}"
     local engine="" runner
     [[ "$PHONON_TTFA_MODE" != streaming ]] || engine="__ptts-stream"
     local filename="TTFA_MODEL_${model_safe}_DATASET_${dataset_safe}_zero_shot_en${engine}__cpu-upgrade.json"
@@ -228,22 +225,12 @@ submit_phonon() {
     [[ -z "${TTFA_DATASET_REVISION:-}" ]] || args+=(--dataset_revision "$TTFA_DATASET_REVISION")
     printf -v runner '%q ' python /app/phonon/run_eval.py "${args[@]}"
     local command="set -euo pipefail
-        umask 077
-        $(inject_cmd_gz "${REPO_ROOT}/phonon/run_eval.py" /app/phonon/run_eval.py)
+        ${inject}
         ${TTFA_INJECT} true || exit 1
-        destination='/results/${model_safe}/${filename}'
-        test ! -e \"\$destination\" || { echo 'TTFA result already exists.' >&2; exit 1; }
-        capacity=\$(nproc)
-        quota=\$(awk '{ if (\$1 == \"max\") print 0; else { n=int(\$1/\$2); print (n>0 ? n : 1) } }' /sys/fs/cgroup/cpu.max 2>/dev/null || echo 0)
-        [[ \"\$quota\" -eq 0 || \"\$quota\" -ge \"\$capacity\" ]] || capacity=\$quota
-        [[ \"\$capacity\" -le 8 ]] || capacity=8
-        threads=${TTFA_CPU_THREADS:-\$capacity}
-        [[ \"\$threads\" -ge 1 && \"\$threads\" -le \"\$capacity\" ]] || exit 1
-        export OMP_NUM_THREADS=\$threads MKL_NUM_THREADS=\$threads OPENBLAS_NUM_THREADS=\$threads
-        work_dir=\$(mktemp -d /tmp/phonon-ttfa.XXXXXXXX)
-        ${runner} --threads \"\$threads\" --output_root \"\$work_dir/quality\" --ttfa_output_root \"\$work_dir/ttfa\"
+        ${preamble}
+        ${runner} --threads \"\${_cpuq}\" --output_root /tmp/phonon/quality --ttfa_output_root /tmp/phonon/ttfa
         mkdir -p '/results/${model_safe}'
-        (set -o noclobber; cat \"\$work_dir/ttfa/results/${model_safe}/${filename}\" > \"\$destination\")
+        cp '/tmp/phonon/ttfa/results/${model_safe}/${filename}' '/results/${model_safe}/'
     "
     local -a job=(hf jobs run --flavor cpu-upgrade --timeout 1h --secrets HF_TOKEN)
     [[ -z "$ORG_NAME" ]] || job+=(--namespace "$ORG_NAME")
@@ -252,10 +239,6 @@ submit_phonon() {
 
 submit_one() {
     local backend="$1" space="$2" model_id="$3" extra="$4" engine="$5"
-    if [[ "$backend" == phonon ]]; then
-        submit_phonon "$model_id" "$space"
-        return
-    fi
     local model_safe="${model_id//\//-}"
     # Drama 3's FP8 experts need native FP8 (sm_89+), so it defaults to h200 instead of the shared
     # A100 default. An explicit TTFA_FLAVOR is kept (and rejected below if it is not h200).
@@ -300,6 +283,11 @@ submit_one() {
             echo "ERROR: CPU thread-cap preamble is empty or truncated — check its quoting." >&2
             return 1
         fi
+    fi
+
+    if [[ "${backend}" == phonon ]]; then
+        submit_phonon "${model_id}" "${space}" "${inject}" "${preamble}"
+        return
     fi
 
     case "${backend}" in
