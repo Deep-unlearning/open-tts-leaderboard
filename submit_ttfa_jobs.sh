@@ -129,6 +129,8 @@ TTFA_TARGETS=(
     "chatterbox|chatterbox|bezzam/evals-chatterbox|ResembleAI/chatterbox|--language=${TTFA_LANG}"
     "cosyvoice3|cosyvoice3|bezzam/evals-cosy|FunAudioLLM/Fun-CosyVoice3-0.5B-2512|--llm_checkpoint=llm.rl.pt"
     "fishaudio-s2-pro|fishaudio-s2-pro|bezzam/evals-fish|fishaudio/s2-pro|"
+    # Drama 3 under SGLang-Omni (GPU only): submit_one starts the server on the pinned snapshot.
+    "fishaudio-drama-3|fishaudio-drama-3|${DRAMA_SPACE:-bezzam/evals-drama3}|fishaudio/drama-3|--host=127.0.0.1 --port=${SGLANG_PORT}|sglang"
     # S2-Pro under SGLang-Omni, its streaming engine (the in-process fish-speech backend above
     # yields once per utterance, so it only gives a whole-utterance clock). Reuses higgs/run_eval.py
     # (a plain client of sgl-omni's /v1/audio/speech), the higgs) case below and the higgs image.
@@ -255,6 +257,13 @@ submit_one() {
         return
     fi
     local model_safe="${model_id//\//-}"
+    # Drama 3's FP8 experts need native FP8 (sm_89+), so it defaults to h200 instead of the shared
+    # A100 default. An explicit TTFA_FLAVOR is kept (and rejected below if it is not h200).
+    local FLAVOR="${FLAVOR}"
+    if [[ "${backend}" == fishaudio-drama-3 && -z "${TTFA_FLAVOR:-}" && "${TTFA_DEVICE}" != cpu ]]; then
+        FLAVOR=h200
+        echo "NOTE: ${model_id} runs on h200 (FP8 experts are unsupported on ${TTFA_GPU_FLAVOR})."
+    fi
     # Sidecar suffix: engine first (when the target names one), then always the flavor.
     local sidecar_suffix="${engine:+__${engine}}__${FLAVOR}"
     local image="hf.co/spaces/${space}"
@@ -294,6 +303,25 @@ submit_one() {
     fi
 
     case "${backend}" in
+        fishaudio-drama-3)
+            # Explicit TTFA_FLAVOR / TTFA_DEVICE=cpu: the FP8 experts need sm_89+ (Triton rejects fp8e4nv on A100).
+            if [[ "${FLAVOR}" != h200 ]]; then
+                echo "ERROR: fishaudio/drama-3 (FP8 experts) does not run on ${FLAVOR}; use TTFA_FLAVOR=h200." >&2
+                return 1
+            fi
+            # Same server start as fishaudio-drama-3/submit_jobs.sh's generate_stage: serve the
+            # pinned snapshot (sglang_omni serve has no --revision). The probe writes voice-clone
+            # references into a temp dir under results/, the server's allowed media root.
+            preamble="${preamble}
+            set -e
+            mkdir -p /app/fishaudio-drama-3/results
+            SNAPSHOT=\$(python -c 'from huggingface_hub import snapshot_download; print(snapshot_download(\"${model_id}\", revision=\"e0a9218aa48888270f06ef1ed9ea67622c0e17d2\"))')
+            python -m sglang_omni.cli serve --model-path \$SNAPSHOT --model-name ${model_id} --host 127.0.0.1 --port ${SGLANG_PORT} \
+                --allowed-local-media-path /app/fishaudio-drama-3/results > /app/fishaudio-drama-3/results/server.log 2>&1 &
+            SERVER_PID=\$!
+            trap 'kill \$SERVER_PID 2>/dev/null || true' EXIT"
+            postamble="|| { echo '--- sglang_omni serve log (full) ---'; cat /app/fishaudio-drama-3/results/server.log; exit 1; }"
+            ;;
         higgs)
             # S2-Pro checkpoints carry no `architectures`, so sgl-omni cannot infer the pipeline
             # config: write the two-line --config its cookbook uses (not shipped in the package).
@@ -379,6 +407,8 @@ for target in "${TTFA_TARGETS[@]}"; do
     fi
     log="${LOG_DIR}/${label}_${model_id//\//-}.log"
     echo "Submitting TTFA probe: ${model_id}  (label=${label}, backend=${backend}, log: ${log})"
+    [[ "${backend}" == fishaudio-drama-3 && -z "${TTFA_FLAVOR:-}" && "${TTFA_DEVICE}" != cpu ]] &&
+        echo "  NOTE: ${model_id} runs on h200, not ${FLAVOR}: its FP8 experts need sm_89+."
     ( submit_one "${backend}" "${space}" "${model_id}" "${extra}" "${engine}" ) > "${log}" 2>&1 &
     # Exact log path: two targets can share a model id (one per engine).
     PIDS+=("$!"); TAGS+=("${label}"); MIDS+=("${model_id}"); LOGS+=("${log}")
